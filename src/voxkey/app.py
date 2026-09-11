@@ -328,7 +328,8 @@ class TrayApp(Foundation.NSObject):
             "phase": PHASE_IDLE, "connected": None, "reason": "", "paused": False,
             "last_text": "", "preview": "", "device_info": "设备信息读取中…",
             "mic_ok": None, "post_ok": None, "injected": "", "device_off": False,
-            "fw_version": "", "battery_pct": None, "battery_charging": False,   # 悬浮条角标
+            "fw_version": "", "battery_pct": None, "battery_mv": None,
+            "battery_charging": False,          # 悬浮条角标（电量/电压/是否充电）
         }
         self.gesture_start = None
         self.utt_no = 0
@@ -513,7 +514,8 @@ class TrayApp(Foundation.NSObject):
             self._standby_logged = connected is False   # 只真掉线才重记（连接中的 None 别重复刷）
             # 设备不在线时版本/电量读不到，角标要跟着空掉，别留着上一次的旧数字
             self.set_state(connected=connected, reason=reason, device_off=power_off,
-                           fw_version="", battery_pct=None, battery_charging=False)
+                           fw_version="", battery_pct=None, battery_mv=None,
+                           battery_charging=False)
             return
         if connected is True:
             green = AppKit.NSColor.systemGreenColor()
@@ -557,7 +559,7 @@ class TrayApp(Foundation.NSObject):
         if info != self.get_state()["device_info"]:      # 变了才记，别每 3 秒刷一遍
             log("设备", info)
         self.set_state(fw_version=ver, battery_pct=pct, battery_charging=charging,
-                       device_info=info)
+                       battery_mv=(bat[1] if bat else None), device_info=info)
         return ""
 
     @objc.python_method
@@ -840,13 +842,14 @@ class TrayApp(Foundation.NSObject):
             self._linger_text = ""
         if show_pill:
             # 角标：左上角固件版本、右上角电量（都来自厂商通道，设备不在线时是空的）。
-            # 充电时写成「充电 30%」——协议里 getBattery 的第 7 个字节就是充电标志，
-            # 这个信息原来只在菜单里显示。
-            ver, pct = st["fw_version"], st["battery_pct"]
+            # 电量后面缀上电压：设备那个百分比字段是 10% 一档的粗表（实测充电一分钟、电压
+            # 涨了 100mV，百分比纹丝不动），而电压是 1mV 分辨率、会实时跟着充放电动——
+            # 想看「更精确」的就看它。充电时右上角转绿，省掉「充电」两个字省宽度。
+            ver, pct, mv = st["fw_version"], st["battery_pct"], st["battery_mv"]
             bat_text = ""
             if pct is not None:
-                bat_text = f"充电 {pct}%" if st["battery_charging"] else f"{pct}%"
-            self.pill.set_meta(f"v{ver}" if ver else "", bat_text)
+                bat_text = f"{pct}% · {mv / 1000:.2f}V" if mv else f"{pct}%"
+            self.pill.set_meta(f"v{ver}" if ver else "", bat_text, st["battery_charging"])
             # 引导元素（波形/呼吸）由 pill 自己画，文字里不再塞 ○●◐ 和转圈字符
             W, RED = AppKit.NSColor.whiteColor(), AppKit.NSColor.systemRedColor()
             BLUE, YELLOW = AppKit.NSColor.systemBlueColor(), AppKit.NSColor.systemYellowColor()

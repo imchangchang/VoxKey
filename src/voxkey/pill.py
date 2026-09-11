@@ -79,6 +79,7 @@ META_SIZE = 10.0
 META_GAP = 9.0
 _META_FONT = NSFont.systemFontOfSize_(META_SIZE)
 _META_COLOR = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.5)
+_META_CHARGING = NSColor.systemGreenColor()      # 充电中：右上角转绿
 
 FADE_OUT_S = 0.28        # 收起草时的淡出时长（用户要求「慢慢隐掉」，别啪一下没）
 
@@ -256,6 +257,7 @@ class Pill(NSObject):
 
         self._meta_l = ""
         self._meta_r = ""
+        self._meta_charging = False
 
         self._status = ""
         self._detail = ""
@@ -404,17 +406,20 @@ class Pill(NSObject):
 
     # ---------- 对外 API ----------
     @objc.python_method
-    def set_meta(self, version: str = "", battery: str = "") -> None:
+    def set_meta(self, version: str = "", battery: str = "", charging: bool = False) -> None:
         """左上角放固件版本、右上角放电量（用户要求：浮窗一出现就能看到设备状态）。
 
         这两样来自厂商通道，只有设备本体在线时才读得到；读不到就传空串，角标自己藏起来。
+        充电时右上角转成绿色——比再塞一个「充电」二字省宽度，扫一眼就知道在充。
         """
         version, battery = version or "", battery or ""
-        if (version, battery) == (self._meta_l, self._meta_r):
+        if (version, battery, charging) == (self._meta_l, self._meta_r, self._meta_charging):
             return
-        self._meta_l, self._meta_r = version, battery
+        self._meta_l, self._meta_r, self._meta_charging = version, battery, charging
         self.t_meta_l.setString_(version)
         self.t_meta_r.setString_(battery)
+        self.t_meta_r.setForegroundColor_(
+            (_META_CHARGING if charging else _META_COLOR).CGColor())
         self._apply()
 
     @objc.python_method

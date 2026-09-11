@@ -279,9 +279,9 @@ def pill_meta() -> str:
     p.show()
 
     # 窄状态（上屏中那种小条）最容易挤：角标必须有地方放，且不能压到状态文字。
-    # 电量用最长的现实文本「充电 100%」，宽度上限就在这里。
+    # 电量用最长的现实文本「100% · 4.20V」，宽度上限就在这里。
     for text, detail in (("上屏中", None), ("听写中", "今天下午三点开会记得带电脑和充电器")):
-        p.set_meta("v4.4.0", "充电 100%")
+        p.set_meta("v4.4.0", "100% · 4.20V")
         p.set_status(text, AppKit.NSColor.systemBlueColor(), P.Pill.LEAD_NONE, detail)
         t = p._targets()
         cw = t["cap"].size.width
