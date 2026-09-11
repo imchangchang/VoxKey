@@ -34,9 +34,6 @@ def find_input_device(name_hint: str = "AU05") -> int | None:
     return None
 
 
-MAX_SEGMENT_S_DEFAULT = 22.0
-
-
 class Recorder:
     """一次录音的采集 + 伪流式预览。预览解码跑在单独线程，绝不阻塞采集。
 
@@ -124,7 +121,7 @@ class Recorder:
         rest = self.samples[self.finalized_n:]
         if len(rest) <= int(self.decoder.max_segment_s * SAMPLE_RATE):
             return False
-        segs = split_for_model(rest)
+        segs = split_for_model(rest, max_s=self.decoder.max_segment_s)
         if len(segs) < 2:               # 还切不出完整的一段，再等等
             return False
         seg = segs[0]

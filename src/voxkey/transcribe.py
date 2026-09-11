@@ -4,7 +4,7 @@
 1. recognizer 不能并发用——上一句还在解码时下一句又进同一个 recognizer，python 直接
    `malloc: *** error for object: pointer being freed was not allocated` abort。所以加锁串行化。
 2. funasr-nano 的 KV 上限 512 token，**音频约 28 秒就顶满**，超了会被截断甚至解出空。
-   所以长音频按 202 秒切段解码再拼，切点挑能量最低处（尽量落在停顿上），别在字中间断开。
+   所以长音频按 22 秒切段解码再拼，切点挑能量最低处（尽量落在停顿上），别在字中间断开。
 """
 
 from __future__ import annotations

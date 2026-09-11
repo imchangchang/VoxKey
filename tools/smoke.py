@@ -57,10 +57,11 @@ def pill_geometry() -> str:
     W, RED, BLUE = (AppKit.NSColor.whiteColor(), AppKit.NSColor.systemRedColor(),
                     AppKit.NSColor.systemBlueColor())
     cases = [
-        ("空闲", W, Pill.LEAD_NONE, None),
-        ("听写中", RED, Pill.LEAD_WAVE, "今天下午三点"),
-        ("听写中", RED, Pill.LEAD_WAVE, "今天下午三点开会记得带电脑和充电器"),
-        ("上屏中", BLUE, Pill.LEAD_NONE, None),
+        ("空闲", W, Pill.LEAD_NONE, None, False),
+        ("听写中", RED, Pill.LEAD_WAVE, "今天下午三点", False),
+        ("听写中", RED, Pill.LEAD_WAVE, "今天下午三点开会记得带电脑和充电器", False),
+        ("上屏中", BLUE, Pill.LEAD_NONE, None, True),
+        ("空闲", W, Pill.LEAD_NONE, None, False),
     ]
     # 不能用 app.run()：没有 app bundle/delegate 时 terminate_ 退不出来，函数会卡死。
     # 手动泵 run loop 更可控——定时器照常触发，Python 侧还能自己看超时。
@@ -101,6 +102,15 @@ def pill_geometry() -> str:
                     off = st.origin.x + st.size.width / 2 - cw / 2
                     if abs(off) > 0.6:
                         fails.append(f"{cases[k][0]} 文字偏心 {off:+.1f}pt")
+                # 30fps 定时器只在需要动的时候开：有波形或呼吸态开着，其余必须停。
+                # （曾经因为拿引导元素常量当状态判断，条件恒真、定时器永不停，空闲文字一直在闪）
+                want_timer = wave or cases[k][4]
+                if want_timer and pill._timer is None:
+                    fails.append(f"{cases[k][0]} 该动却没开定时器")
+                if not want_timer and pill._timer is not None:
+                    fails.append(f"{cases[k][0]} 不该动却还开着定时器")
+                if not cases[k][4] and pill.t_status.opacity() < 0.999:
+                    fails.append(f"{cases[k][0]} 呼吸没复位（opacity={pill.t_status.opacity():.2f}）")
                 done.add(k)
 
     probe = Probe.alloc().init()

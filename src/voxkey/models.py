@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -69,7 +68,7 @@ def _sense_voice():
 
 def _funasr_nano():
     d = MODELS / "sherpa-onnx-funasr-nano-int8-2025-12-30"
-    # 线程数可调（ONESAY_THREADS）。实测（44s 音频 / 3 段，本机 18 核）：4 线程 1048ms 一段、
+    # 线程数可调（VOXKEY_THREADS）。实测（44s 音频 / 3 段，本机 18 核）：4 线程 1048ms 一段、
     # 6 线程 984ms、8 线程 1026ms——**加线程没用**，解码不是 CPU 瓶颈，所以保持 4。
     # 真正的省时办法是边录边把满段解掉（见 voxkey/audio.py 的 _finalize_closed）。
     return sherpa_onnx.OfflineRecognizer.from_funasr_nano(
@@ -77,7 +76,7 @@ def _funasr_nano():
         llm=_pick(d, "llm"),
         embedding=_pick(d, "embedding"),
         tokenizer=str(d / "Qwen3-0.6B"),
-        num_threads=int(os.environ.get("ONESAY_THREADS", "4")),
+        num_threads=int(os.environ.get("VOXKEY_THREADS", "4")),
     )
 
 
@@ -96,17 +95,26 @@ REGISTRY = [
 ]
 
 
+class ModelNotAvailable(RuntimeError):
+    """模型名字写错 / 没下载 / 不是离线模型。
+
+    故意不用 `sys.exit`：常驻主程序是在后台线程里加载模型的（app.py 的 `load_model`），
+    `SystemExit` 不是 `Exception`，`except Exception` 抓不到，整个进程会静默死掉、菜单还停在
+    「上屏中」。抛异常让调用方决定是进错误态还是打印一句退出。
+    """
+
+
 def load_recognizer(name: str):
     """按名字加载离线模型；名字见 REGISTRY。首选的常驻模型是 `funasr-nano-int8`。"""
     entry = next((e for e in REGISTRY if e[0] == name), None)
     if entry is None:
         names = ", ".join(n for n, k, _, _ in REGISTRY if k == "offline")
-        sys.exit(f"未知模型 {name}；可选：{names}")
+        raise ModelNotAvailable(f"未知模型 {name}；可选：{names}")
     _, kind, builder, model_dir = entry
     if kind != "offline":
-        sys.exit(f"{name} 不是离线模型，常驻软件需要离线模型做伪流式")
+        raise ModelNotAvailable(f"{name} 不是离线模型，常驻软件需要离线模型做伪流式")
     if not (MODELS / model_dir).is_dir():
-        sys.exit(f"模型未下载：{model_dir}（目录 {MODELS}，可用 VOXKEY_MODELS_DIR 覆盖）")
+        raise ModelNotAvailable(f"模型未下载：{model_dir}（目录 {MODELS}，可用 VOXKEY_MODELS_DIR 覆盖）")
     print(f"加载模型 {name} …", flush=True)
     t0 = time.perf_counter()
     rec = builder()

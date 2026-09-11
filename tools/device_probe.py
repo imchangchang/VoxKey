@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AU05 设备诊断 CLI：读设备信息、监听上报帧、给按键槽写/清「哨兵键」。
 
-用法（在 host/ 目录下）：
+用法（仓库根目录，PYTHONPATH=src 或 pip install -e .）：
   .venv/bin/python tools/device_probe.py info
   .venv/bin/python tools/device_probe.py listen --secs 15      # 边听边按按键/转旋钮
   .venv/bin/python tools/device_probe.py set-key --slot 0 --combo ctrl+alt+cmd+F9

@@ -272,7 +272,7 @@ def reactivate(pid: int, wait: float = 0.18) -> bool:
 
     返回是否成功把它拉回前台；拉不回来就别注入——宁可不上屏，也别把字打进错误的窗口。
     """
-    from AppKit import NSRunningApplication, NSWorkspace
+    from AppKit import NSRunningApplication
     app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
     if app is None:
         return False

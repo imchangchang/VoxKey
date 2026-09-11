@@ -4,15 +4,17 @@
 没有时序要求——想按就按、想说什么说什么，屏幕会自己显示收到了什么。
 用来回答「这颗键到底有没有发东西给上位机」和「说完能不能出字」。
 
-用法（在 host/ 目录下）：
-  python -m voxkey.device.monitor              # 只监视，不粘贴
-  python -m voxkey.device.monitor --paste      # 松手后自动 Cmd+V 上屏（要辅助功能权限）
+用法（仓库根目录，PYTHONPATH=src 或 pip install -e .）：
+  python -m voxkey.device.monitor              # 只监视，不上屏
+  python -m voxkey.device.monitor --paste      # 松手后自动上屏（要辅助功能权限）
+  python -m voxkey.device.monitor --copy       # 松手后复制到剪贴板（要 pyperclip）
   python -m voxkey.device.monitor --raw        # 连原始报文一起打（排查用）
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 import threading
 import time
 from datetime import datetime
@@ -25,7 +27,8 @@ from voxkey.device import protocol as P
 from voxkey.device.device import VibeKey, VibeKeyNotFound
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, KEY_LABELS, MOD_CMD,
                                      MOD_CTRL, MOD_OPT, MOD_SHIFT, DeviceKeyReader)
-from voxkey.models import load_recognizer
+from voxkey.inject import Injector
+from voxkey.models import ModelNotAvailable, load_recognizer
 from voxkey.transcribe import Decoder
 
 KEY_NAMES = dict(KEY_LABELS)
@@ -46,7 +49,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="AU05 按键 + 语音实时监视")
     ap.add_argument("--model", default="funasr-nano-int8")
     ap.add_argument("--device", default="AU05", help="录音设备名关键字，空串=系统默认")
-    ap.add_argument("--paste", action="store_true", help="松手后自动 Cmd+V 上屏")
+    ap.add_argument("--paste", action="store_true",
+                    help="松手后自动上屏（跟常驻软件同一条路：AX 直写 → 合成按键，要辅助功能权限）")
+    ap.add_argument("--copy", action="store_true", help="松手后把结果复制到剪贴板（要 pyperclip）")
     ap.add_argument("--raw", action="store_true", help="打印原始按键报文")
     ap.add_argument("--save-audio", metavar="DIR", default=None,
                     help="把每句话的音频存成 wav（调 ASR 用，如 --save-audio /tmp/utt）")
@@ -71,7 +76,11 @@ def main() -> int:
 
     device = find_input_device(args.device)
     print(f"麦克风   : {sd.query_devices(device)['name'] if device is not None else '（系统默认）'}")
-    decoder = Decoder(load_recognizer(args.model), max_segment_s=args.segment_s)
+    try:
+        decoder = Decoder(load_recognizer(args.model), max_segment_s=args.segment_s)
+    except ModelNotAvailable as e:
+        sys.exit(str(e))
+    injector = Injector()
     print("=" * 68)
     log("就绪", "按设备上的键就会出现在下面；按住语音键说话，松手出字。Ctrl+C 退出。")
     print(flush=True)
@@ -117,12 +126,17 @@ def main() -> int:
         seg = f"{decoder.last_segments} 段，" if decoder.last_segments > 1 else ""
         log("结果", f"{text}   [音频 {dur:.1f}s，{seg}松手→出字 {ms:.0f}ms]")
         if args.paste:
-            paste_clipboard(text, restore=True)
-            log("上屏", f"Cmd+V 已发（松手→上屏 {(time.monotonic() - t_release) * 1000:.0f}ms）")
-        else:
-            import pyperclip
-            pyperclip.copy(text)
-            log("剪贴板", "已复制（加 --paste 可自动上屏）")
+            # 跟上屏走同一条路（AX 直写 → 合成 Unicode 按键），不碰剪贴板——见 voxkey.inject
+            injected = injector.inject(text)
+            log("上屏", f"{injected}（松手→上屏 {(time.monotonic() - t_release) * 1000:.0f}ms）")
+        elif args.copy:
+            try:
+                import pyperclip
+            except ImportError:
+                log("剪贴板", "没装 pyperclip（pip install -e '.[tools]'）")
+            else:
+                pyperclip.copy(text)
+                log("剪贴板", "已复制")
 
     def on_state(mods: int, keys: list[int]) -> None:
         if args.raw:

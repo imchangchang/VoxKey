@@ -4,7 +4,7 @@
 网速组件 + 一排应用图标），macOS 26 直接不给我们新状态项位置——连超宽文字测试项都画不出来。
 所以常驻形态的「随时可见」不能只靠菜单栏图标，得有个不占位置的悬浮条。
 
-架构（调研 boring.notch / DynamicNotchKit / NotchDrop 三个开源实现后定的，做法见 README 与提交历史）：**窗口固定尺寸、创建后绝不再改 frame；展开/收起动画
+架构（调研 boring.notch / DynamicNotchKit / NotchDrop 三个开源实现后定的）：**窗口固定尺寸、创建后绝不再改 frame；展开/收起动画
 全部发生在窗口内容的 CALayer 上**（CASpringAnimation，弹簧在 Core Animation 渲染服务里插值，
 Python 主线程不参与动画帧）。之前 60fps 每帧 `setFrame_display_` 改窗口尺寸的路线抖动严重，
 调研确认三个成熟项目没有一个是这么做的——DynamicNotchKit 甚至把透明窗口开到半屏大，
@@ -181,8 +181,9 @@ class Pill(NSObject):
     # 引导元素：只有「波形」一种（录音时显示）。其余状态就是纯文字居中——圆点挂在文字边上
     # 永远不可能同时「符号居中」和「文字居中」，用户拍板去掉（2026-09-10）。
     LEAD_NONE, LEAD_WAVE = "none", "wave"
-    # 兼容旧常量
-    LEAD_DOT, LEAD_PULSE = LEAD_NONE, LEAD_NONE
+    # 注意：这里曾经有 LEAD_DOT / LEAD_PULSE，圆点去掉后被写成等于 LEAD_NONE，
+    # 于是「要不要跑 30fps 定时器」的判断恒真、定时器永远不停（空闲文字一直呼吸、
+    # 还白耗电）。现在改用显式的 `pulse` 参数，别再拿引导元素常量当状态标志用。
 
     def initWithHandler_(self, handler):
         self = objc.super(Pill, self).init()
@@ -237,6 +238,7 @@ class Pill(NSObject):
         self._detail = ""
         self._color = NSColor.whiteColor()
         self._lead = self.LEAD_NONE
+        self._pulsing = False            # 「上屏中」才开呼吸；定时器跟着它和波形走
         self._pulse = 0.0
         self._rms = 0.0                  # 音频线程写、UI tick 读（单个 float 赋值，CPython 下原子）
         self._level = 0.0                # 平滑后的显示电平（快起慢落）
@@ -341,33 +343,38 @@ class Pill(NSObject):
     # ---------- 对外 API ----------
     @objc.python_method
     def set_status(self, text: str, color=None, lead: str = LEAD_NONE,
-                   detail: str | None = None) -> None:
+                   detail: str | None = None, pulse: bool = False) -> None:
         """设置状态行（`text` + 引导元素）与内容行（`detail`）。
 
         `detail` 非空就走两行：状态行居中在上面（标签本体永远在胶囊正中，屏幕上不动），
         内容在下面一行左右撑开。预览每 0.8 秒更新一次，每次只在这里设一次动画目标；
         什么都不变时直接返回（主程序每 0.12 秒会调一次）。
+
+        `pulse=True` 让状态文字轻微呼吸（「上屏中」用），也是唯一能让 30fps 定时器
+        在没波形时继续跑的理由——定时器只在录音/上屏中才开，空闲必须停。
         """
         if color is not None:
             self._color = color
         detail = detail or ""
-        changed_status = (text != self._status) or (lead != self._lead)
+        changed_status = (text != self._status) or (lead != self._lead) or (pulse != self._pulsing)
         changed_detail = detail != self._detail
         if not changed_status and not changed_detail:
             if color is not None:
                 self._apply_style()
             return
         self._status, self._detail, self._lead = text, detail, lead
+        self._pulsing = pulse
         # 文字先落到 CATextLayer，度量（attributedString）才是新文本
         self.t_status.setString_(self._status)
         self.t_detail.setString_(self._detail)
         self._apply_style()
         self._apply()
         self._log_geometry()
-        if self._lead in (self.LEAD_WAVE, self.LEAD_PULSE):
+        if self._lead == self.LEAD_WAVE or self._pulsing:
             self._ensure_timer()
         else:
             self._stop_timer()
+            self.t_status.setOpacity_(1.0)   # 呼吸停下来要复位，否则文字卡在暗值上
 
     @objc.python_method
     def _apply_style(self) -> None:
@@ -384,10 +391,9 @@ class Pill(NSObject):
 
     @objc.python_method
     def set_level(self, rms: float) -> None:
-        """音频回调线程每块调一次（实时 RMS）。只存值，30fps tick 自己读。"""
+        """音频回调线程每块调一次（实时 RMS）。只存值，30fps tick 自己读——
+        这里绝不能碰 UI：NSTimer 绑的是当前线程的 run loop，在音频线程上建就等于永不触发。"""
         self._rms = float(rms)
-        if self._lead == self.LEAD_WAVE:
-            self._ensure_timer()
 
     @objc.python_method
     def place_bottom(self, center_x: float | None = None) -> None:
@@ -508,8 +514,9 @@ class Pill(NSObject):
                 bh = 6.0 + (BAR_MAX_H - 6.0) * (LEVEL_FLOOR + (1 - LEVEL_FLOOR) * self._level) * ph
                 bar.setBounds_(NSMakeRect(0, 0, BAR_W, bh))
         else:                                     # 上屏中：文字轻微呼吸，当「工作中」的反馈
-            self._pulse += 0.06
-            self.t_status.setOpacity_(0.62 + 0.38 * abs(math.sin(self._pulse)))
+            if self._pulsing:
+                self._pulse += 0.06
+                self.t_status.setOpacity_(0.62 + 0.38 * abs(math.sin(self._pulse)))
         Quartz.CATransaction.commit()
 
     @objc.python_method

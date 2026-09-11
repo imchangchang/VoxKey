@@ -31,7 +31,6 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from pathlib import Path as _P
 
 import numpy as np
 import objc
@@ -137,6 +136,7 @@ class KeySupervisor(threading.Thread):
         self.on_conn = on_conn
         self.stop_event = stop_event
         self.reader: DeviceKeyReader | None = None
+        self._dropped_reason: str | None = None   # 同一条掉线原因只报一次，别每 2 秒刷一遍日志
 
     def run(self) -> None:
         while not self.stop_event.is_set():
@@ -144,9 +144,14 @@ class KeySupervisor(threading.Thread):
                 self._drop("设备未连接")
                 self.stop_event.wait(2.0)
                 continue
+            if self.reader is not None and not self.reader.is_alive():
+                # 设备还在（枚举得到），但读线程已经死了：多半是拔插过接收器，hidapi 句柄失效。
+                err = self.reader.error
+                self._drop(f"按键读取中断（{err}），等你插回来" if err else "按键读取中断，等你插回来")
             if self.reader is None:
                 try:
                     self.reader = DeviceKeyReader(self.on_key).start()
+                    self._dropped_reason = None
                     self.on_conn(True)
                     log("设备", "键盘集合已打开，语音键监听中")
                 except Exception as e:
@@ -154,14 +159,19 @@ class KeySupervisor(threading.Thread):
             self.stop_event.wait(2.0)
 
     def _drop(self, reason: str) -> None:
-        if self.reader is not None:
+        had_reader = self.reader is not None
+        if had_reader:
             try:
                 self.reader.stop()
             except Exception:
                 pass
             self.reader = None
+        # 首次掉线（包括「启动时设备就没插」，这时本来就没有 reader）必须报出去：
+        # 只报 had_reader 的话 connected 会一直是 None，菜单永远显示「设备探测中」。
+        if had_reader or self._dropped_reason != reason:
             self.on_conn(False, reason)
             log("设备", reason)
+        self._dropped_reason = reason
 
     def reconnect(self) -> None:
         self._drop("手动重连")
@@ -224,18 +234,20 @@ class TrayApp(Foundation.NSObject):
         if self.args.debug_keys:
             log("报文", f"mods=0x{mods:02x} keys={[hex(k) for k in keys]}")
         st = self.get_state()
-        if st["paused"]:
-            return
         ptt = (KC_VOICE in keys
                or (KC_F9 in keys and (mods & (MOD_CTRL | MOD_OPT | MOD_CMD)) ==
                    (MOD_CTRL | MOD_OPT | MOD_CMD)))
         cancel = KC_ESC in keys or KC_F11 in keys
+        # 转发不受暂停影响：设备的键盘集合被我们独占，暂停时若不再转发，
+        # 设备上的「确认/取消」两键谁都收不到（Enter/退格全哑）。
         self._route_keys(keys)
 
         if ptt:
             if self.gesture_start is None:          # 一次物理按压只认第一条报文
                 self.gesture_start = time.monotonic()
-                if self.current_stop is None:
+                # 暂停只挡「开始新的一次录音」——松手/取消必须照常处理，
+                # 否则录到一半点暂停，松手报文被吞掉，会一直录到 60 秒上限才收摊。
+                if self.current_stop is None and not st["paused"]:
                     self._start_recording()
             return
 
@@ -323,8 +335,14 @@ class TrayApp(Foundation.NSObject):
                        is_busy=lambda: self.get_state().get("inflight", 0) > 0)
         try:
             cap.start()
-        except Exception as e:
+        except Exception:
             self._resolve_audio_device()          # 可能是设备刚换编号，重解析后再试一次
+            # 半开的那条流要显式关掉：sounddevice 的 Stream 没有 __del__，GC 不会替你关，
+            # 一直占着输入设备会让第二次 start 更容易失败。
+            try:
+                cap.stop()
+            except Exception:
+                pass
             try:
                 cap = Recorder(self.decoder, self.audio_device,
                                on_preview=lambda t: self.set_state(preview=t, result_ts=time.monotonic()),
@@ -342,7 +360,7 @@ class TrayApp(Foundation.NSObject):
         cancelled = self.cancel_event.is_set()
         self.cancel_event.clear()
         try:
-            self._finish_utterance(cap, samples, t_release, t_rec_stop)
+            self._finish_utterance(cap, samples, t_release, t_rec_stop, cancelled)
         finally:
             self.set_state(inflight=max(0, self.get_state().get("inflight", 1) - 1))
             # 这一句结束了（不管是上屏、取消还是太短），把状态清干净，
@@ -350,7 +368,6 @@ class TrayApp(Foundation.NSObject):
             if self.current_stop is not None and self.current_stop[0] is stop_ev:
                 self.current_stop = None
 
-    @objc.python_method
     @objc.python_method
     def _archive_audio(self, cap, samples, hold_ms: float) -> None:
         """把这次按键的音频存下来 + 索引一行（按住多久 / 录到几秒 / 有没有声音）。"""
@@ -363,7 +380,7 @@ class TrayApp(Foundation.NSObject):
         dur = n / SAMPLE_RATE
         rms = float(np.sqrt((samples ** 2).mean())) if n else 0.0
         peak = float(np.abs(samples).max()) if n else 0.0
-        d = _P(self.args.save_audio)
+        d = Path(self.args.save_audio)
         d.mkdir(parents=True, exist_ok=True)
         wav = d / f"utt{self.utt_no:03d}_{datetime.now().strftime('%H%M%S')}.wav"
         with wave.open(str(wav), "wb") as w:
@@ -378,8 +395,9 @@ class TrayApp(Foundation.NSObject):
         log("存档", f"#{self.utt_no} {wav.name} 按住 {hold_ms:.0f}ms / 音频 {dur:.2f}s / RMS {rms:.4f}")
 
     @objc.python_method
-    def _finish_utterance(self, cap, samples, t_release, t_rec_stop) -> None:
-        if self.cancel_event.is_set():
+    def _finish_utterance(self, cap, samples, t_release, t_rec_stop, cancelled: bool = False) -> None:
+        # 取消状态必须在外面读、传进来：caller 已经 clear 了 cancel_event，在这里再读永远是 False
+        if cancelled:
             self.set_state(phase=PHASE_IDLE, preview="")
             return
         dur = len(samples) / SAMPLE_RATE
@@ -490,6 +508,7 @@ class TrayApp(Foundation.NSObject):
             BLUE, YELLOW = AppKit.NSColor.systemBlueColor(), AppKit.NSColor.systemYellowColor()
             ORANGE = AppKit.NSColor.systemOrangeColor()
             lead = Pill.LEAD_NONE
+            pulse = False
             age = time.monotonic() - st.get("result_ts", 0)
             color, text, detail = W, f"{label}", None
             if phase == PHASE_REC:
@@ -498,8 +517,9 @@ class TrayApp(Foundation.NSObject):
                 lead, color = Pill.LEAD_WAVE, RED
                 detail = (st["preview"][:60] or None)
             elif phase == PHASE_PROC:
-                # 上屏中不再重复显示转写文本（用户要求）：缩小成一个小条「上屏中」就够了
-                lead, color = Pill.LEAD_NONE, BLUE
+                # 上屏中不再重复显示转写文本（用户要求）：缩小成一个小条「上屏中」就够了。
+                # 呼吸是这一档唯一的动效，pulse=True 才让 pill 的 30fps 定时器开着。
+                color, pulse = BLUE, True
             elif st["paused"]:
                 color = YELLOW
             elif st["connected"] is False:
@@ -508,7 +528,7 @@ class TrayApp(Foundation.NSObject):
                 text, color = "空闲 · 缺辅助功能权限", ORANGE
             elif st["injected"].startswith("未上屏") and age < 3.0:
                 text, color = st["injected"][:30], ORANGE
-            self.pill.set_status(text, color, lead, detail)
+            self.pill.set_status(text, color, lead, detail, pulse=pulse)
 
     @objc.python_method
     def flash(self, symbolic: str, tint, secs: float = 1.5) -> None:
@@ -608,13 +628,18 @@ class TrayApp(Foundation.NSObject):
             except Exception as e:
                 log("自检", f"取悬浮条状态失败：{e}")
             log("自检", f"状态项 isVisible={bool(self.item.isVisible())} frame={frame} "
+                        f"屏内={inside} 落在刘海区={in_notch}"
                         f"（注意：macOS 26 的 NSSceneStatusItem 这个 frame 跟实际渲染位置不一致——"
                         f"实测 frame 报 668、截图 diff 显示真在 1095）")
         except Exception as e:
             log("自检", f"取图标位置失败：{e}")
 
     def copyLast_(self, _sender):
-        import pyperclip
+        try:
+            import pyperclip
+        except ImportError:
+            log("剪贴板", "没装 pyperclip（pip install -e '.[tools]'），这个菜单项用不了")
+            return
         text = self.get_state()["last_text"]
         if text:
             pyperclip.copy(text)
@@ -736,7 +761,10 @@ class TrayApp(Foundation.NSObject):
 
     @objc.python_method
     def run(self) -> None:
-        if not SingleInstance().acquire():
+        # 实例必须存下来：写成 SingleInstance().acquire() 的话临时对象当场被回收、
+        # 文件句柄一关 flock 就释放了，锁活不过一次函数调用，第二个实例照样能起。
+        self._lock = SingleInstance()
+        if not self._lock.acquire():
             print(f"已有一个 VoxKey 菜单栏实例在跑（锁文件 {LOCK_FILE}）。", flush=True)
             sys.exit(2)
 

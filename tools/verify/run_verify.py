@@ -7,11 +7,13 @@
 - RTF：处理耗时 / 音频时长（<1 表示快于实时）
 - 精修延迟：离线模型整句解码耗时（ms），即"松手到出字"
 
-用法（在 host/ 目录下）：
-  .venv/bin/python verify/run_verify.py                     # 全量
-  .venv/bin/python verify/run_verify.py --only zipformer-bilingual
-  .venv/bin/python verify/run_verify.py --groups zh mix
-  .venv/bin/python verify/run_verify.py --corpus verify/corpus_real  # 真人录音目录
+用法（仓库根目录）：
+  PYTHONPATH=src .venv/bin/python tools/verify/run_verify.py                     # 全量
+  PYTHONPATH=src .venv/bin/python tools/verify/run_verify.py --only zipformer-bilingual
+  PYTHONPATH=src .venv/bin/python tools/verify/run_verify.py --groups zh mix
+  PYTHONPATH=src .venv/bin/python tools/verify/run_verify.py --corpus <真人录音目录>
+
+语料不在仓库里：默认取 tools/verify/corpus/（transcripts.tsv + 同名 wav，16k 单声道）。
 """
 
 import argparse
@@ -28,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # voxkey 
 
 from metrics import cer
 from voxkey.models import MODELS, REGISTRY   # 模型注册表在软件本体里（src/voxkey/models.py）
+
+CHUNK_S = 0.1    # 模拟实时喂流的块长，跟常驻软件的采集块一致（voxkey/audio.py 的 BLOCK）
 
 
 # ---------- 音频与评测 ----------

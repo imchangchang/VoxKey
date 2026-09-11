@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tools = ["pyperclip"]   # tools/ptt_demo.py 的剪贴板上屏路径
+# 命令行 demo（tools/ptt_demo.py）用的剪贴板 + 模拟 ⌘V：软件本体两条都不需要
+tools = ["pyperclip", "pynput"]
 
 [project.scripts]
 voxkey = "voxkey.app:main"

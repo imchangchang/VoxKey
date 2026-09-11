@@ -62,6 +62,7 @@ class DeviceKeyReader:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._dev: hid.device | None = None
+        self.error: Exception | None = None
 
     def start(self) -> "DeviceKeyReader":
         path = find_keyboard_path()
@@ -74,10 +75,19 @@ class DeviceKeyReader:
         self._thread.start()
         return self
 
+    def is_alive(self) -> bool:
+        """读线程还活着吗。掉了（拔接收器时 hidapi 抛 OSError）要由 KeySupervisor 重开——
+        光看 `reader is not None` 会以为它还在，表现就是「插回去按键没反应，得重启 App」。"""
+        return self._thread is not None and self._thread.is_alive()
+
     def _loop(self) -> None:
         last: tuple[int, tuple[int, ...]] | None = None
         while not self._stop.is_set():
-            raw = self._dev.read(64)
+            try:
+                raw = self._dev.read(64)
+            except Exception as e:  # 设备被拔/句柄失效：记下原因退出，交给看守重连
+                self.error = e
+                return
             if not raw:
                 time.sleep(0.004)
                 continue

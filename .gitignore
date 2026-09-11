@@ -13,3 +13,6 @@ models/
 *.wav
 *.log
 .DS_Store
+
+# 验证语料（tools/verify/gen_corpus.sh 现场生成，TTS 几百 KB 音频不值得进仓库）
+tools/verify/corpus/

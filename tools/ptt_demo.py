@@ -21,13 +21,16 @@ import sys
 import threading
 import time
 
-from voxkey.audio import Recorder, find_input_device
+import numpy as np
+import sounddevice as sd
+
+from voxkey.audio import BLOCK, Recorder, find_input_device
 from voxkey.device import protocol as P
 from voxkey.device.device import VibeKey, VibeKeyNotFound
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, MOD_CTRL,
                                      MOD_OPT, DeviceKeyReader)
-from voxkey.models import load_recognizer
-from voxkey.transcribe import Decoder
+from voxkey.models import ModelNotAvailable, load_recognizer
+from voxkey.transcribe import SAMPLE_RATE, Decoder
 
 SENTINEL_DEFAULT = ("ctrl", "alt", "cmd", "F9")
 
@@ -224,7 +227,10 @@ def main() -> int:
     else:
         print("没找到 AU05 录音设备，用系统默认输入")
 
-    decoder = Decoder(load_recognizer(args.model))
+    try:
+        decoder = Decoder(load_recognizer(args.model))
+    except ModelNotAvailable as e:
+        sys.exit(str(e))
     rec = Recorder(decoder, device)
 
     if args.trigger == "device":
