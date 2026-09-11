@@ -186,12 +186,14 @@ class KeySupervisor(threading.Thread):
         self.on_conn = on_conn
         self.stop_event = stop_event
         self.ready_probe = ready_probe        # () -> bool：设备真的能用了么（见 TrayApp._device_ready）
-        self.device_alive = device_alive      # () -> bool：设备本体（键盘）还答话吗
+        self.device_alive = device_alive      # () -> str：""=设备本体在线；否则是「为什么问不到」
         self.reader: DeviceKeyReader | None = None
         self._dropped_reason: str | None = None   # 同一条掉线原因只报一次，别每 2 秒刷一遍日志
         self._device_off = False
         self._power_fails = 0
         self._last_power_probe = 0.0
+        self._last_alive = time.monotonic()   # 最后一次「设备应答」的时刻，用来算沉默多久
+        self._silence_logged = 0.0
 
     def run(self) -> None:
         while not self.stop_event.is_set():
@@ -235,7 +237,8 @@ class KeySupervisor(threading.Thread):
         为什么不能靠 HID 枚举/键盘集合/CoreAudio 判断：实测「接收器插着但键盘关机」时，
         HID 里 if2/if3 都还在、键盘集合照样能打开、CoreAudio 里 AU05 也还在——三者全都说
         「在」，只有厂商通道不应答；键盘一开机，厂商通道立刻回 version 和电量。
-        所以判据只能是厂商通道答不答话。
+        所以判据只能是厂商通道答不答话；而「答不答话」还要再分待机和关机，交给
+        TrayApp._device_power_probe 用一帧心跳去区分（见那里的注释）。
         """
         if self.device_alive is None or self.reader is None:
             return
@@ -243,19 +246,31 @@ class KeySupervisor(threading.Thread):
         if now - self._last_power_probe < self.POWER_PROBE_EVERY_S:
             return
         self._last_power_probe = now
-        if self.device_alive():
+        why = self.device_alive()          # "" = 在线；否则是「为什么问不到」
+        if not why:
+            self._last_alive = now
             self._power_fails = 0
             if self._device_off:
                 self._device_off = False
+                self._silence_logged = 0.0
                 self._dropped_reason = None
                 self.on_conn(True)
-                log("设备", "设备本体应答了（开机了），语音键监听中")
+                log("设备", "设备本体应答了，语音键监听中")
             return
         self._power_fails += 1
+        silence = now - self._last_alive
+        if self._power_fails == 1:
+            log("设备", f"厂商通道第一次问不到（{why}）——继续观察（可能只是待机）")
         if self._power_fails >= self.POWER_FAILS_TO_OFF and not self._device_off:
             self._device_off = True
             self.on_conn(False, "设备已关机", True)
-            log("设备", "设备本体不应答（关机/没电）——接收器还插着，等你开机")
+            log("设备", f"连续 {self._power_fails} 次问不到，已沉默 {silence:.0f}s（{why}）"
+                        f"——接收器还插着，当关机处理，等你开机")
+        elif self._device_off and now - self._silence_logged >= 60.0:
+            # 长时间沉默时每分钟记一条，好对着时间轴看「沉默是不是卡在待机阈值上」
+            self._silence_logged = now
+            log("设备", f"仍问不到（已沉默 {silence:.0f}s，最后一次应答在 "
+                        f"{time.strftime('%H:%M:%S', time.localtime(time.time() - silence))}）")
 
     def _wait_ready(self) -> bool:
         """等到 ready_probe 说「能用」。没有探针就只等 settle。"""
@@ -320,6 +335,12 @@ class TrayApp(Foundation.NSObject):
         self._audio_dirty = False      # 设备掉过线 → 下次录音前重新枚举音频设备
         self._last_unknown: tuple = ()  # 上次报过的未知键码（去重，别刷屏）
         self._woke_device = False       # 这次连接有没有给设备发过唤醒心跳
+        self._wake_tested = False       # 这一轮「问不到」有没有试过用心跳区分待机/关机
+        self._standby_logged = False    # 待机阈值每次连接只记一次
+        # 每 3 秒问一次厂商通道会一直「吵醒」设备，它自己那个 300 秒待机就永远触发不了。
+        # 要观察待机（或单纯省电）时用 VOXKEY_NO_DEVICE_PROBE=1 关掉周期探测，
+        # 这时设备状态只在启动时读一次，之后靠按键报文判断在线。
+        self._probe_enabled = not os.environ.get("VOXKEY_NO_DEVICE_PROBE")
         self._linger_text = ""          # 收场提示的文字（"" = 没有）
         self._linger_color = None
         self._linger_until = 0.0        # 收场倒计时的到期时刻（0 = 还没开始计时）
@@ -375,6 +396,12 @@ class TrayApp(Foundation.NSObject):
                         f"keys={[hex(k) for k in keys]}）")
         self._last_unknown = unknown
         st = self.get_state()
+        if keys and (st["device_off"] or st["connected"] is False):
+            # 收到按键 = 设备明明活着：刚才那个「关机」判定错了（多半只是进了待机，或者是我们
+            # 探测时它正在打盹）。立刻翻回在线，别让用户对着「设备已关机」按半天。
+            log("设备", "收到按键报文——设备在线（此前的『设备已关机』是待机或误判）")
+            self.on_conn(True, linger="已唤醒")
+            st = self.get_state()
         ptt = (KC_VOICE in keys
                or (KC_F9 in keys and (mods & (MOD_CTRL | MOD_OPT | MOD_CMD)) ==
                    (MOD_CTRL | MOD_OPT | MOD_CMD)))
@@ -476,18 +503,23 @@ class TrayApp(Foundation.NSObject):
         threading.Thread(target=self.handle_utterance, args=(stop_ev,), daemon=True).start()
 
     @objc.python_method
-    def on_conn(self, connected: bool, reason: str = "", power_off: bool = False) -> None:
+    def on_conn(self, connected: bool, reason: str = "", power_off: bool = False,
+                linger: str = "") -> None:
         prev = self.get_state()
         if not connected:
             self._audio_dirty = True      # 设备掉过线，音频设备表要重新枚举（见 _resolve_audio_device）
             self._woke_device = False     # 下次连上要重新唤醒一次
+            self._wake_tested = False
+            self._standby_logged = connected is False   # 只真掉线才重记（连接中的 None 别重复刷）
             # 设备不在线时版本/电量读不到，角标要跟着空掉，别留着上一次的旧数字
             self.set_state(connected=connected, reason=reason, device_off=power_off,
                            fw_version="", battery_pct=None)
             return
         if connected is True:
             green = AppKit.NSColor.systemGreenColor()
-            if prev["device_off"]:
+            if linger:
+                self._set_linger(linger, green)
+            elif prev["device_off"]:
                 self._set_linger("已开机", green)          # 关机→开机：先说一声再收起（用户要求）
             elif prev["connected"] is None:
                 self._set_linger("已连接", green)          # 连接中→就绪：同理
@@ -496,29 +528,36 @@ class TrayApp(Foundation.NSObject):
     # ---------- 设备「真的能用了吗」（插回来时报「已连接」之前先过这一关） ----------
 
     @objc.python_method
-    def _read_device_status(self) -> bool:
-        """读一次设备本体状态，顺带当「在不在线」的探测：厂商通道答话 = 设备在线。
+    def _read_device_status(self) -> str:
+        """读一次设备本体状态。返回 ""=在线；非空字符串 = 为什么问不到。
 
-        一次会话里把版本和电量都读掉——电量顺便喂给悬浮条右上角的角标（用户要求：浮窗出现
-        时就能看到设备状态）。返回设备在不在线。
+        一次会话里把版本和电量都读掉——电量顺便喂给悬浮条右上角的角标（用户要求）。
+        连着第一次读时顺带把「待机秒数」也读出来记进日志：协议里写着「待机超时后厂商口不响应」，
+        所以「厂商通道不应答」既可能是关机、也可能只是闲久了进待机，得先知道这个阈值。
         """
         try:
             with VibeKey() as vk:
                 ver = vk.version()
                 if ver is None:
-                    return False
+                    return "打开成功但不应答"
                 bat = vk.battery()
-        except Exception:
-            return False
+                if not self._standby_logged:
+                    self._standby_logged = True
+                    secs = vk.standby_seconds()
+                    if secs is not None:
+                        log("设备", f"待机设置 {secs}s（超时后厂商通道不再响应——所以「问不到」"
+                                    f"不等于关机，见 _device_power_probe）")
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
         pct = bat[0] if bat else None
         charging = bool(bat[2]) if bat else False
         info = f"固件 {ver}" + (f" · 电量 {pct}%" if pct is not None else "")
         if charging:
             info += "（充电中）"
-        if info != self.get_state()["device_info"]:      # 变了才记，别每 4 秒刷一遍
+        if info != self.get_state()["device_info"]:      # 变了才记，别每 3 秒刷一遍
             log("设备", info)
         self.set_state(fw_version=ver, battery_pct=pct, device_info=info)
-        return True
+        return ""
 
     @objc.python_method
     def _wake_device(self) -> None:
@@ -530,11 +569,34 @@ class TrayApp(Foundation.NSObject):
             log("设备", f"心跳没发出去：{e}")
 
     @objc.python_method
-    def _device_power_probe(self) -> bool:
-        """设备本体还在线吗（看守线程周期性问）。录音中不打扰，直接当在线。"""
+    def _device_power_probe(self) -> str:
+        """周期性问一句「设备本体还在吗」。返回 ""=在线，否则返回「为什么问不到」。
+
+        问不到的时候**先敲一帧心跳再判**：待机（协议里 5 分钟没用就不响应厂商口）和真关机
+        在现象上完全一样——HID 枚举在、键盘集合适能打开、CoreAudio 里 AU05 也在，只有厂商通道沉默。
+        能敲醒 → 是待机，继续当在线；敲不醒 → 才更像真关机。这是唯一能区分的办法，
+        心跳本身也是协议表里为这件事准备的（"试着唤醒假死的厂商口"）。
+        """
         if self.current_stop is not None:
-            return True
-        return self._read_device_status()
+            return ""                      # 录音中不打扰
+        if not self._probe_enabled:
+            return ""                      # VOXKEY_NO_DEVICE_PROBE=1：完全不打搅设备
+        why = self._read_device_status()
+        if not why:
+            self._wake_tested = False
+            return ""
+        if self._wake_tested:              # 这一轮沉默已经试过唤醒了，别每 3 秒敲一次
+            return why
+        self._wake_tested = True
+        self._wake_device()
+        time.sleep(0.15)
+        if self._read_device_status() == "":
+            self._wake_tested = False
+            log("设备", f"厂商通道沉默（{why}）→ 发心跳唤醒了：是待机，不是关机（"
+                        f"{self.get_state()['device_info']}）")
+            return ""
+        log("设备", f"厂商通道沉默（{why}）→ 发心跳也没反应：更像真关机/没电")
+        return why
 
     @objc.python_method
     def _audio_device_present(self) -> bool:
@@ -559,7 +621,7 @@ class TrayApp(Foundation.NSObject):
         if not self._woke_device:
             self._woke_device = True
             self._wake_device()          # 先敲一下（设备待机时厂商口不响应）
-        if not self._read_device_status():
+        if self._read_device_status() != "":
             return False
         return self._audio_device_present()
 

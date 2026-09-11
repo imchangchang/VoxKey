@@ -144,3 +144,15 @@ class VibeKey:
         """读一个单字节配置项（HooksMode / 媒体键这类）。"""
         data = self.request(b1, b2, b0=b0, payload=payload)
         return data[0] if data else None
+
+    def standby_seconds(self) -> int | None:
+        """待机秒数（u32le）。
+
+        协议表里的说明是「超时后厂商口不响应」——也就是说「厂商通道不应答」这个现象，
+        既可能是设备关机，也可能只是闲久了进待机。把配置值读出来记进日志，
+        将来对时间轴就能知道沉默是不是卡在这个秒数上。
+        """
+        data = self.request(0x01, 0x2C)
+        if not data or len(data) < 4:
+            return None
+        return int.from_bytes(data[:4], "little")
