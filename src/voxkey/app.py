@@ -224,6 +224,7 @@ class TrayApp(Foundation.NSObject):
         self.utt_no = 0
         self._routed = set()
         self.pill_auto = True          # 悬浮条自动显示（空闲收起）；菜单里可以关掉
+        self._audio_dirty = False      # 设备掉过线 → 下次录音前重新枚举音频设备
         self.min_audio_s = getattr(args, "min_audio_s", MIN_AUDIO_S)
         return self
 
@@ -283,12 +284,35 @@ class TrayApp(Foundation.NSObject):
             self._stop_recording(f"松开（按住 {hold_ms:.0f}ms）")
 
     @objc.python_method
+    def _reload_audio_devices(self) -> None:
+        """重新枚举音频设备（Pa_Terminate + Pa_Initialize）。
+
+        真机踩到：USB 接收器插拔之后 PortAudio 的设备表还是旧的——`sd.query_devices()` 照样
+        把 AU05 报在原来的编号上，于是我们拿着一个**已经不存在的设备**去 open，报
+        `-10851 (Audio Unit: Invalid Property Value)` 再 `-9986`，而新起一个进程立刻就能录
+        （新进程会重新枚举）。不重新初始化就永远打不开。
+        `_terminate/_initialize` 是 sounddevice 的私有 API，但它自己的 FAQ 就是这么写的，
+        而且调用点是「刚打不开、手里没有任何 stream」的时候，代价只是几十毫秒。
+        """
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception as e:
+            log("音频", f"重载 PortAudio 设备表失败：{e}")
+
+    @objc.python_method
     def _resolve_audio_device(self) -> int | None:
         """每次录音前重新解析输入设备。
 
         真机踩过：USB 接收器插拔后 CoreAudio 会给设备换一个编号，缓存的那个编号就失效了，
         表现是「按语音键没反应」——其实按键报文正常，是麦克风打不开（PortAudio -9986）。
+        注意这里只能刷新「我们缓存的那个编号」；PortAudio 自己的设备表要 `_reload_audio_devices()`。
         """
+        if self._audio_dirty:
+            # 设备掉线过（插拔接收器）：PortAudio 的设备表还是旧的，**必须先重新枚举再解析编号**，
+            # 否则解析出来的还是旧表里的旧编号。这样插回来第一次按键就能直接录上。
+            self._audio_dirty = False
+            self._reload_audio_devices()
         dev = find_input_device(self.args.device)
         if dev != self.audio_device:
             try:
@@ -324,7 +348,7 @@ class TrayApp(Foundation.NSObject):
         stop_ev = threading.Event()
         self.current_stop = (stop_ev,)
         self.cancel_event.clear()
-        self.set_state(phase=PHASE_REC, preview="")
+        self.set_state(phase=PHASE_REC, preview="", reason="")
         self.state["t_press"] = time.monotonic()
         pid, name = frontmost_info()
         self.state["target_pid"], self.state["target_name"] = pid, name
@@ -333,6 +357,8 @@ class TrayApp(Foundation.NSObject):
 
     @objc.python_method
     def on_conn(self, connected: bool, reason: str = "") -> None:
+        if not connected:
+            self._audio_dirty = True      # 设备掉过线，音频设备表要重新枚举（见 _resolve_audio_device）
         self.set_state(connected=connected, reason=reason)
 
     # ---------- 一次说话的全流程（后台线程） ----------
@@ -355,8 +381,15 @@ class TrayApp(Foundation.NSObject):
                        is_busy=lambda: self.get_state().get("inflight", 0) > 0)
         try:
             cap.start()
-        except Exception:
-            self._resolve_audio_device()          # 可能是设备刚换编号，重解析后再试一次
+        except Exception as e1:
+            # 打不开基本上是插拔过接收器：PortAudio 的设备表还是旧的（见 _reload_audio_devices），
+            # 先重新枚举再重解析编号，然后重试一次。
+            log("音频", f"打不开（{e1}），重新枚举音频设备后重试")
+            self._reload_audio_devices()
+            self._resolve_audio_device()
+            log("音频", f"重载后设备表 {len(sd.query_devices())} 个，AU05 → " +
+                        (f"#{self.audio_device} {sd.query_devices(self.audio_device)['name']}"
+                         if self.audio_device is not None else "（没找到，用系统默认）"))
             # 半开的那条流要显式关掉：sounddevice 的 Stream 没有 __del__，GC 不会替你关，
             # 一直占着输入设备会让第二次 start 更容易失败。
             try:
@@ -370,7 +403,11 @@ class TrayApp(Foundation.NSObject):
                                is_busy=lambda: self.get_state().get("inflight", 0) > 0)
                 cap.start()
             except Exception as e2:
-                self.set_state(phase=PHASE_ERR, reason=f"麦克风打不开：{e2}")
+                # 这次录音录不成，但不代表软件坏了：回空闲 + 提示几秒，下次按键会重新枚举设备再试。
+                # （以前把 phase 打成 PHASE_ERR 会一直挂着一条「上屏不可用」，用户以为是软件坏了，
+                # 其实只是这次没打开麦克风）
+                self.set_state(phase=PHASE_IDLE, reason=f"麦克风打不开：{e2}",
+                               injected="未上屏：麦克风打不开", result_ts=time.monotonic())
                 log("错误", f"麦克风打不开（重试后仍失败）：{e2}")
                 self.current_stop = None
                 return
@@ -551,12 +588,15 @@ class TrayApp(Foundation.NSObject):
             elif st["connected"] is False:
                 color = YELLOW
             elif st["phase"] == PHASE_ERR:
-                # 持续的错误态（模型没下载完、麦克风打不开）：把原因写出来，否则只有「未上屏」三个字
-                text, color, detail = "上屏不可用", ORANGE, (st["reason"] or None)
+                # 持续的错误态（模型没下载完就跑起来了）：reason 形如「模型加载失败：xxx」，
+                # 大标题取冒号前那半句，剩下的放内容行——原来只有「未上屏」三个字，看不出原因
+                head, _, tail = (st["reason"] or "出错了").partition("：")
+                text, color, detail = (head or "出错了"), ORANGE, (tail.strip() or None)
             elif not st["post_ok"]:
                 text, color = "缺辅助功能权限", ORANGE
             elif fault:
                 text, color = st["injected"][:30], ORANGE
+                detail = (st["reason"].partition("：")[2].strip() or None)   # 失败原因写全
             self.pill.set_status(text, color, lead, detail, pulse=pulse)
         # 先更新内容再显示：窗口弹出来时不会闪一下上一次的旧内容
         if want_pill != bool(self.pill.win.isVisible()):
