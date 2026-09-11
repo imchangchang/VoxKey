@@ -515,7 +515,9 @@ class TrayApp(Foundation.NSObject):
                 # 状态行只放「听写中」，预览文字走下面一行——文字变长时是条子左右张开，
                 # 状态标签始终钉在正中间不动（用户要求）。
                 lead, color = Pill.LEAD_WAVE, RED
-                detail = (st["preview"][:60] or None)
+                # 不在这里截断：能放多少行由 pill 按实际行高决定（放不下就显示最近的尾巴），
+                # 以前这里硬切 [:60]（正好两行），长语音说到两行就再也不长了。
+                detail = (st["preview"] or None)
             elif phase == PHASE_PROC:
                 # 上屏中不再重复显示转写文本（用户要求）：缩小成一个小条「上屏中」就够了。
                 # 呼吸是这一档唯一的动效，pulse=True 才让 pill 的 30fps 定时器开着。

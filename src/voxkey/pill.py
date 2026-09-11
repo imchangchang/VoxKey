@@ -37,7 +37,12 @@ from Foundation import NSObject, NSTimer
 PAD_X, PAD_Y = 13.0, 6.0
 ROW_GAP = 4.0                    # 状态行与内容行之间
 MIN_W, MIN_H = 60.0, 30.0
-MAX_W, MAX_LINES = 520.0, 4
+MAX_W = 520.0
+# 内容行（听写预览）最多几行。长语音的预览是整段的（定稿段 + 尾巴），几十秒的话远远超过
+# 这个容量，超出部分由 _fit_detail 保留「最近说的」——所以它一直在往前滚，不会停在某个
+# 长度上不动（用户反馈的就是这个：说到某个长度下面就不长了）。
+MAX_LINES = 6
+LINE_H = 15.0                    # 12.5pt 中英混排的实测行高（量出来正好是 15.0 的整数倍）
 MARGIN = 18.0                    # 胶囊离「可见区域底边」的距离（可见区域已排除 Dock 与菜单栏）
 
 # 波形竖条（录音时显示，取代原来的圆点/呼吸点）
@@ -49,11 +54,15 @@ GAP = 7.0                        # 波形与文字之间
 # （实测「听写中」量出 38pt，给 44pt 仍然只显示「听写」）。居中按实测文字的中心对齐。
 SAFE_W, SLACK_H = 12.0, 3.0
 
-# 固定窗口比最大内容大一圈：余量给层阴影（画在胶囊层上）和长文本
+# 固定窗口比最大内容大一圈：余量给层阴影（画在胶囊层上）和长文本。
+# 高度按「内容行放满 MAX_LINES」算出来，别再手写死数字——改了 MAX_LINES 忘了改窗口，
+# 多出来的行会被窗口顶部裁掉（胶囊底边固定，往上长）。
 WIN_PAD_X = 30.0
 WIN_BOTTOM = 20.0
+SHADOW_MARGIN = 25.0             # 胶囊层的阴影要往上/往下各留出这么多，不然会被窗口边界切掉
 WIN_W = MAX_W + 2 * WIN_PAD_X
-WIN_H = 140.0
+WIN_H = (WIN_BOTTOM + SHADOW_MARGIN + PAD_Y * 2 + LINE_H + SLACK_H + ROW_GAP
+         + (MAX_LINES * LINE_H + SLACK_H))          # 实测 = 172.0
 
 # 弹簧参数（CASpringAnimation）：约临界阻尼，到位置就停、不回弹
 SPRING_STIFFNESS = 200.0
@@ -236,6 +245,7 @@ class Pill(NSObject):
 
         self._status = ""
         self._detail = ""
+        self._shown_detail = ""          # 实际放进图层的文本（超长时是裁过的尾巴）
         self._color = NSColor.whiteColor()
         self._lead = self.LEAD_NONE
         self._pulsing = False            # 「上屏中」才开呼吸；定时器跟着它和波形走
@@ -268,6 +278,32 @@ class Pill(NSObject):
         lay.setBounds_(NSMakeRect(0, 0, BAR_W, 6.0))
         self.clip.addSublayer_(lay)
         return lay
+
+    @objc.python_method
+    def _fit_detail(self, text: str) -> str:
+        """把内容裁到最多 MAX_LINES 行；超出就**保留最近说的**（砍掉最前面），前缀一个省略号。
+
+        为什么保留尾巴而不是开头：听写时人关心的是「我刚说的那句对不对」，而且这样文字会
+        一直往前滚——不会像以前那样说到某个长度就停在原地不动（用户反馈的问题）。
+        返回的是给图层看的字符串，`self._detail` 仍然存完整文本（变化检测用）。
+        """
+        if not text:
+            return ""
+        inner = MAX_W - 2 * PAD_X
+
+        def fits(s: str) -> bool:
+            return self._measure(self.t_detail, s, inner)[1] <= MAX_LINES * LINE_H + 0.5
+
+        if fits(text):
+            return text
+        lo, hi = 0, len(text)              # 二分找「最短的、还放得下的后缀」起点
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if fits("…" + text[mid:]):
+                hi = mid
+            else:
+                lo = mid + 1
+        return "…" + text[lo:]
 
     # ---------- 度量 ----------
     @objc.python_method
@@ -321,8 +357,8 @@ class Pill(NSObject):
         status_w, status_h = self._measure(self.t_status, self._status, inner - lead_w - gap)
         status_h = status_h or 15.0
         row1_w = (lead_w + gap + status_w) if self._status else 0.0
-        detail_w, detail_h = self._measure(self.t_detail, self._detail, inner)
-        stacked = bool(self._detail)
+        detail_w, detail_h = self._measure(self.t_detail, self._shown_detail, inner)
+        stacked = bool(self._shown_detail)
         row2_w, row2_h = (detail_w, detail_h + SLACK_H) if stacked else (0.0, 0.0)
 
         cw = max(MIN_W, min(MAX_W, max(row1_w, row2_w) + 2 * PAD_X))
@@ -363,10 +399,11 @@ class Pill(NSObject):
                 self._apply_style()
             return
         self._status, self._detail, self._lead = text, detail, lead
+        self._shown_detail = self._fit_detail(detail)     # 图层里放的可能是裁过的尾巴
         self._pulsing = pulse
         # 文字先落到 CATextLayer，度量（attributedString）才是新文本
         self.t_status.setString_(self._status)
-        self.t_detail.setString_(self._detail)
+        self.t_detail.setString_(self._shown_detail)
         self._apply_style()
         self._apply()
         self._log_geometry()

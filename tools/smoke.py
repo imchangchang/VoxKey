@@ -129,6 +129,43 @@ def pill_geometry() -> str:
     return "四态内容均在框内且居中"
 
 
+def pill_long_preview() -> str:
+    """长语音预览：内容行不能超过 MAX_LINES 行、不能顶出窗口，超出时保留最近的（尾巴）。"""
+    import AppKit
+    from voxkey import pill as P
+
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    p = P.Pill.alloc().initWithHandler_(lambda: None)
+    p.place_bottom(None)
+    p.show()
+
+    def check_case(text, want_ellipsis):
+        p.set_status("听写中", AppKit.NSColor.systemRedColor(), P.Pill.LEAD_WAVE, text)
+        t = p._targets()
+        cap_h = t["cap"].size.height
+        shown = p._shown_detail
+        if t["detail_h"] > P.MAX_LINES * P.LINE_H + 0.5:
+            raise AssertionError(f"内容 {len(shown)} 字却有 {t['detail_h']}pt（> {P.MAX_LINES} 行）")
+        if cap_h > P.WIN_H - P.WIN_BOTTOM:
+            raise AssertionError(f"胶囊 {cap_h}pt 顶出窗口（窗口 {P.WIN_H}）")
+        if want_ellipsis:
+            if not shown.startswith("…"):
+                raise AssertionError("超长内容没有省略号标记")
+            if not text.endswith(shown[1:]):
+                raise AssertionError("裁掉的不是开头（应保留最近说的）")
+        elif shown != text:
+            raise AssertionError(f"短内容被改了：{shown!r} != {text!r}")
+        return len(shown)
+
+    # 一句短预览：原样显示
+    check_case("今天下午三点开会记得带电脑和充电器", False)
+    # 长语音：40 秒上下的话，远超 6 行 → 保留尾巴
+    long_text = ("今天下午三点开会记得带电脑和充电器顺便把周报发给我" * 12)
+    kept = check_case(long_text, True)
+    return f"短句原样显示；{len(long_text)} 字裁到 {kept} 字（保留尾部）"
+
+
 def model_ok() -> str:
     from voxkey.models import MODELS, load_recognizer
     if not MODELS.is_dir():
@@ -153,6 +190,7 @@ def main() -> int:
     ok = True
     ok &= check("包导入", imports_ok)
     ok &= check("悬浮条几何断言", pill_geometry)
+    ok &= check("长语音预览裁剪", pill_long_preview)
     if args.no_model:
         print(f"{DIM}— 跳过模型加载{END}")
     else:
