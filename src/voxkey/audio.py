@@ -23,6 +23,40 @@ BLOCK = 1600             # 100ms
 PREVIEW_INTERVAL = 0.8   # 伪流式重解码间隔
 MAX_UTTERANCE_S = 60     # 单次说话上限
 
+# 「到底有没有人在说话」的判据。原来的 RMS 闸门（0.002）太松：用户按了键什么都没说，
+# 底噪也能过闸，模型就会脑补出「嗯。」这类字（用户报的问题）。
+# 现在先用 1/10 分位估这段音频自己的底噪，再数「明显高于底噪」的 20ms 帧总时长。
+# 阈值是拿本机 100 多条按键录音标定出来的：真话最短的（一声「哎。」）像说话的时长 0.46s、
+# 峰值 0.097；已知那两条幻听的时长是 0.28/0.32/0.44s、峰值 0.0198~0.0745。
+SPEECH_FRAME_MS = 20     # 判定用的帧长
+SPEECH_FLOOR_PCTL = 10   # 用 1/10 分位当底噪
+SPEECH_FLOOR_X = 3.0     # 高于底噪这么多倍才算「有内容」
+SPEECH_ABS_MIN = 0.005   # 底噪极低时的兜底门槛
+SPEECH_MIN_SEC = 0.35    # 「像说话」的总时长下限
+SPEECH_MIN_PEAK = 0.03   # 峰值下限（拦住短促的咔哒声那种）
+
+
+def speech_stats(audio: np.ndarray, sr: int = SAMPLE_RATE) -> tuple[float, float]:
+    """返回（像说话的总时长秒数, 峰值帧 RMS）。
+
+    底噪是**自适应**的：不同的人、离麦远近、房间噪声都不一样，用固定绝对阈值必然要么漏
+    （说话轻的时候）要么误收（环境吵的时候）。先估底噪，再数明显高于它的帧，就与绝对音量无关。
+    """
+    n = int(sr * SPEECH_FRAME_MS / 1000)
+    if len(audio) < n:
+        return 0.0, (float(np.abs(audio).max()) if len(audio) else 0.0)
+    frames = audio[: len(audio) // n * n].reshape(-1, n).astype(np.float32)
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+    floor = float(np.percentile(rms, SPEECH_FLOOR_PCTL))
+    thr = max(floor * SPEECH_FLOOR_X, SPEECH_ABS_MIN)
+    return float((rms > thr).sum() * SPEECH_FRAME_MS / 1000), float(rms.max())
+
+
+def has_speech(audio: np.ndarray, sr: int = SAMPLE_RATE) -> tuple[bool, float, float]:
+    """这段音频里到底有没有人说话。返回（有吗, 像说话的时长, 峰值）。"""
+    sec, peak = speech_stats(audio, sr)
+    return (sec >= SPEECH_MIN_SEC and peak >= SPEECH_MIN_PEAK), sec, peak
+
 
 def find_input_device(name_hint: str = "AU05") -> int | None:
     """按名字找录音设备；找不到返回 None（用系统默认）。"""
@@ -153,6 +187,11 @@ class Recorder:
         def work():
             t0 = time.monotonic()
             try:
+                # 还没听到人说话就别喂模型：没有有效语音时它会对着底噪脑补出「嗯。」这类字，
+                # 而预览是直接显示给用户看的（用户报的就是「按了没说话，听写中却有字」）。
+                ok, sec, peak = has_speech(self.samples)
+                if not ok:
+                    return
                 # 有满段就先定稿（这一轮不再刷尾巴预览，避免同一轮解两次把解码器占满）
                 if self._finalize_closed():
                     text = self.finalized_text

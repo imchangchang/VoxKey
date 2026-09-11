@@ -41,7 +41,8 @@ import AVFoundation  # noqa: E402
 import Foundation  # noqa: E402
 import Quartz  # noqa: E402
 
-from voxkey.audio import Recorder, find_input_device
+from voxkey.audio import (SPEECH_MIN_PEAK, SPEECH_MIN_SEC, Recorder, find_input_device,
+                          has_speech)
 from voxkey.device import protocol as P
 from voxkey.device.device import VibeKey
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, MOD_CTRL,
@@ -73,7 +74,6 @@ ROUTE_KEYS = {0x28: 36,    # HID 0x28 Enter       → macOS vk 36 (Return)
 KNOWN_KEYCODES = {KC_VOICE, KC_ESC, KC_F9, KC_F11, *ROUTE_KEYS}
 
 MIN_AUDIO_S = 0.5       # 短于这个时长直接丢（用户要求：<0.5s 忽略，避免静音被模型脑补出字）
-SILENCE_RMS = 0.002     # 音量低于此值视为「没说话」——实测 0.0008 的 0.2s 片段会被识别成「嗯」
 FAULT_HOLD_S = 3.0      # 「未上屏」提示在悬浮条上留多久（用户要求：空闲就收起来）
 LINGER_S = 1.2          # 悬浮条收起之前，先把「收场状态」显示这么久（用户要求：消失前要有对应交互）
 PHASE_META = {
@@ -718,17 +718,22 @@ class TrayApp(Foundation.NSObject):
         hold_ms = (t_release - self.get_state().get("t_press", t_release)) * 1000
         self._archive_audio(cap, samples, hold_ms)
         rms = float(np.sqrt((samples ** 2).mean())) if len(samples) else 0.0
-        log("音频", f"按住 {hold_ms:.0f}ms → 录到 {dur:.2f}s，RMS {rms:.4f}")
+        spoken, sp_sec, sp_peak = has_speech(samples)
+        log("音频", f"按住 {hold_ms:.0f}ms → 录到 {dur:.2f}s，RMS {rms:.4f}，"
+                    f"像说话的时长 {sp_sec:.2f}s（峰值 {sp_peak:.4f}）")
         if dur < self.min_audio_s:            # 太短：不送模型，免得被脑补出「嗯」这类填充词
             log("忽略", f"只录到 {dur:.2f}s（< {self.min_audio_s:.2f}s），这次丢掉")
             self.set_state(phase=PHASE_IDLE, last_text="", preview="",
                            injected=f"未上屏：只录到 {dur:.2f}s（太短，已忽略）",
                            result_ts=time.monotonic())
             return
-        if rms < SILENCE_RMS:                 # 有长度但基本没声音：同样不送模型
-            log("忽略", f"录到 {dur:.2f}s 但基本无声（RMS {rms:.4f}），这次丢掉")
+        if not spoken:
+            # 没有有效语音就别送模型——它会对着底噪脑补出「嗯。」（用户报的问题）。
+            # 判据见 audio.has_speech：自适应底噪 + 像说话的总时长 + 峰值。
+            log("忽略", f"没检测到说话（像说话的时长 {sp_sec:.2f}s < {SPEECH_MIN_SEC}s "
+                        f"或峰值 {sp_peak:.4f} < {SPEECH_MIN_PEAK}），这次丢掉")
             self.set_state(phase=PHASE_IDLE, last_text="", preview="",
-                           injected=f"未上屏：录到 {dur:.2f}s 但没声音（已忽略）",
+                           injected=f"未上屏：没听到说话（{sp_sec:.1f}s 有效语音）",
                            result_ts=time.monotonic())
             return
         text = cap.decode(samples)

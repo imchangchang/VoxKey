@@ -332,6 +332,49 @@ def linger_rule() -> str:
     return f"4 条规则全对（收起前留 {LINGER_S}s 显示收场状态）"
 
 
+def speech_gate() -> str:
+    """说话检测闸门：稳态噪声/咔哒声不能当说话，安静的正常说话要放过。
+
+    阈值是拿本机 100 多条按键录音标定的（真话最短的一声「哎。」有效语音 0.46s、峰值 0.097；
+    已知两条幻听是 0.28~0.44s、峰值 0.02~0.07）。这里用合成信号把规则钉住。
+    """
+    import numpy as np
+    from voxkey.audio import has_speech
+
+    sr = 16000
+    rng = np.random.default_rng(0)
+
+    def noise(sec, amp):
+        return (rng.standard_normal(int(sr * sec)) * amp).astype(np.float32)
+
+    def speech_like(burst_amp, gap_amp, total=1.6, on=0.15, off=0.08):
+        """模拟说话：一阵一阵的（有声段 + 停顿），而不是一直平稳。"""
+        out, t = [], 0.0
+        while t < total:
+            out.append(noise(on, burst_amp))
+            out.append(noise(off, gap_amp))
+            t += on + off
+        return np.concatenate(out)
+
+    cases = [
+        ("纯静音", np.zeros(int(sr * 1.5), dtype=np.float32), False),
+        ("稳态底噪 0.005", noise(1.5, 0.005), False),
+        ("稳态底噪 0.02", noise(1.5, 0.02), False),
+        ("稳态噪声 0.05（按键盘那一下）", noise(1.0, 0.05), False),
+        ("正常说话（有停顿、有起伏）", speech_like(0.15, 0.001), True),
+        ("小声说话（峰值只有 0.04）", speech_like(0.04, 0.002), True),
+    ]
+    fails = []
+    for name, audio, want in cases:
+        ok, sec, peak = has_speech(audio)
+        if ok != want:
+            fails.append(f"{name}：期望{'放过' if want else '拦下'}，实得{'放过' if ok else '拦下'}"
+                         f"（有效语音 {sec:.2f}s 峰值 {peak:.4f}）")
+    if fails:
+        raise AssertionError("；".join(fails))
+    return f"{len(cases)} 条合成用例全对"
+
+
 def model_ok() -> str:
     from voxkey.models import MODELS, load_recognizer
     if not MODELS.is_dir():
@@ -359,6 +402,7 @@ def main() -> int:
     ok &= check("长语音预览裁剪", pill_long_preview)
     ok &= check("悬浮条显示规则", pill_wanted_table)
     ok &= check("收起前的收场提示", linger_rule)
+    ok &= check("说话检测闸门", speech_gate)
     ok &= check("悬浮条收起再显示", pill_show_hide)
     ok &= check("悬浮条淡出收起", pill_fade)
     ok &= check("悬浮条角标（版本/电量）", pill_meta)
