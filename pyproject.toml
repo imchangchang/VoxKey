@@ -13,6 +13,7 @@ dependencies = [
     "numpy",
     "sounddevice",      # 设备麦克风采集（CoreAudio）
     "sherpa-onnx",      # 离线识别（funasr-nano-int8）
+    "hidapi",           # 读设备（AU05）自己的 HID 按键报文
 ]
 
 [project.optional-dependencies]
