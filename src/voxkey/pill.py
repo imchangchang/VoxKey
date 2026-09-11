@@ -80,6 +80,8 @@ META_GAP = 9.0
 _META_FONT = NSFont.systemFontOfSize_(META_SIZE)
 _META_COLOR = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.5)
 
+FADE_OUT_S = 0.28        # 收起草时的淡出时长（用户要求「慢慢隐掉」，别啪一下没）
+
 
 def _fade(layer, to: float, duration: float = 0.18) -> None:
     """透明度淡入淡出：符号出现/消失不做瞬时跳变（用户反馈「符号像从别处刷出来」）。"""
@@ -266,6 +268,7 @@ class Pill(NSObject):
         self._level = 0.0                # 平滑后的显示电平（快起慢落）
         self._meas: dict = {}
         self._timer = None
+        self._fade_gen = 0               # 淡出代号：show() 会 +1，作废在跑的淡出回调
         return self
 
     @objc.python_method
@@ -499,6 +502,8 @@ class Pill(NSObject):
 
     @objc.python_method
     def show(self) -> None:
+        self._fade_gen += 1          # 作废可能在跑的淡出：别让它的回调把刚显示的窗口收掉
+        self.win.setAlphaValue_(1.0)
         self.win.orderFrontRegardless()
         self._place_window()
         self._apply()
@@ -508,9 +513,29 @@ class Pill(NSObject):
             self._ensure_timer()
 
     @objc.python_method
-    def hide(self) -> None:
-        self.win.orderOut_(None)
+    def hide(self, animated: bool = True) -> None:
+        """收起：默认**淡出**，不是啪一下消失（用户要求「慢慢隐掉」）。
+
+        淡出期间窗口还在，所以用一个代号防串台——淡出没结束又被 show() 的话，
+        老的回调不能把新显示出来的窗口收掉。
+        """
         self._stop_timer()
+        if not animated or not self.win.isVisible():
+            self.win.orderOut_(None)
+            return
+        from AppKit import NSAnimationContext
+        self._fade_gen += 1
+        gen = self._fade_gen
+
+        def done():
+            if self._fade_gen == gen:
+                self.win.orderOut_(None)
+
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.currentContext().setDuration_(FADE_OUT_S)
+        NSAnimationContext.currentContext().setCompletionHandler_(done)
+        self.win.animator().setAlphaValue_(0.0)
+        NSAnimationContext.endGrouping()
 
     @objc.python_method
     def set_visible(self, visible: bool) -> None:

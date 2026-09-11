@@ -210,9 +210,9 @@ def pill_show_hide() -> str:
     p = P.Pill.alloc().initWithHandler_(lambda: None)
     p.place_bottom(None)
     p.show()
-    p.hide()
+    p.hide(animated=False)          # 这个用例只关心定时器，先要立刻收起
     if p.win.isVisible():
-        raise AssertionError("hide() 之后窗口还可见")
+        raise AssertionError("hide(animated=False) 之后窗口还可见")
     # 隐藏状态下切到「听写中」：这时窗口还没出来，定时器不该建
     p.set_status("听写中", AppKit.NSColor.systemRedColor(), P.Pill.LEAD_WAVE, "今天下午三点")
     if p._timer is not None:
@@ -222,10 +222,48 @@ def pill_show_hide() -> str:
         raise AssertionError("show() 之后窗口还不可见")
     if p._timer is None:
         raise AssertionError("重新显示后波形定时器没起来（波形会冻住）")
-    p.hide()
+    p.hide(animated=False)
     if p._timer is not None:
         raise AssertionError("收起后定时器没停")
     return "隐藏时不建定时器；重新显示后自己起来；收起时停掉"
+
+
+def pill_fade() -> str:
+    """收起是淡出（不是啪一下没）；淡出没结束又被 show() 的话，窗口不能被老回调收掉。"""
+    import AppKit
+    from Foundation import NSDate, NSRunLoop
+    from voxkey import pill as P
+
+    def pump(sec):
+        end = time.monotonic() + sec
+        while time.monotonic() < end:
+            NSRunLoop.currentRunLoop().runMode_beforeDate_(
+                "NSDefaultRunLoopMode", NSDate.dateWithTimeIntervalSinceNow_(0.02))
+
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    p = P.Pill.alloc().initWithHandler_(lambda: None)
+    p.place_bottom(None)
+    p.show()
+    p.hide()
+    if not p.win.isVisible():
+        raise AssertionError("hide() 是瞬间收起，不是淡出")
+    pump(P.FADE_OUT_S + 0.4)
+    if p.win.isVisible():
+        raise AssertionError("淡出结束后窗口还挂着")
+
+    # 淡出中途再 show()：老的淡出回调不能把它收掉
+    p.show()
+    p.hide()
+    pump(P.FADE_OUT_S / 2)
+    p.show()
+    pump(P.FADE_OUT_S + 0.4)
+    if not p.win.isVisible():
+        raise AssertionError("淡出中途重新 show() 之后，窗口被老回调收掉了")
+    if abs(p.win.alphaValue() - 1.0) > 0.01:
+        raise AssertionError(f"重新显示后透明度没复位（{p.win.alphaValue():.2f}）")
+    p.hide(animated=False)
+    return f"收起是 {P.FADE_OUT_S}s 淡出；中途重新显示不会被老回调收掉"
 
 
 def pill_meta() -> str:
@@ -270,6 +308,28 @@ def pill_meta() -> str:
     return f"角标不出框、不压状态文字；清空后藏起来并收窄（{with_meta:.0f}→{without:.0f}）"
 
 
+def linger_rule() -> str:
+    """收场倒计时规则：由「该显示」变「不该显示」的那一刻才开始计时，中途不能被清掉。"""
+    from voxkey.app import LINGER_S, next_linger
+
+    fails = []
+    # 一直有正经理由显示 → 不计时（0 表示没在计时）
+    if next_linger(True, True, 0.0, 100.0, LINGER_S) != 0.0:
+        fails.append("还在显示时不该开始倒计时")
+    # 刚由真变假 → 从现在开始计时
+    if next_linger(False, True, 0.0, 100.0, LINGER_S) != 100.0 + LINGER_S:
+        fails.append("由真变假没有开始倒计时")
+    # 已经是假、且正在计时 → 不能重置（否则永远收不起来）
+    if next_linger(False, False, 123.0, 100.0, LINGER_S) != 123.0:
+        fails.append("倒计时中途被重置了")
+    # 倒计时中途又变回「该显示」→ 作废
+    if next_linger(True, False, 123.0, 100.0, LINGER_S) != 0.0:
+        fails.append("重新有理由显示时没作废倒计时")
+    if fails:
+        raise AssertionError("；".join(fails))
+    return f"4 条规则全对（收起前留 {LINGER_S}s 显示收场状态）"
+
+
 def model_ok() -> str:
     from voxkey.models import MODELS, load_recognizer
     if not MODELS.is_dir():
@@ -296,7 +356,9 @@ def main() -> int:
     ok &= check("悬浮条几何断言", pill_geometry)
     ok &= check("长语音预览裁剪", pill_long_preview)
     ok &= check("悬浮条显示规则", pill_wanted_table)
+    ok &= check("收起前的收场提示", linger_rule)
     ok &= check("悬浮条收起再显示", pill_show_hide)
+    ok &= check("悬浮条淡出收起", pill_fade)
     ok &= check("悬浮条角标（版本/电量）", pill_meta)
     if args.no_model:
         print(f"{DIM}— 跳过模型加载{END}")

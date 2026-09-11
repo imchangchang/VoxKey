@@ -75,12 +75,28 @@ KNOWN_KEYCODES = {KC_VOICE, KC_ESC, KC_F9, KC_F11, *ROUTE_KEYS}
 MIN_AUDIO_S = 0.5       # 短于这个时长直接丢（用户要求：<0.5s 忽略，避免静音被模型脑补出字）
 SILENCE_RMS = 0.002     # 音量低于此值视为「没说话」——实测 0.0008 的 0.2s 片段会被识别成「嗯」
 FAULT_HOLD_S = 3.0      # 「未上屏」提示在悬浮条上留多久（用户要求：空闲就收起来）
+LINGER_S = 1.2          # 悬浮条收起之前，先把「收场状态」显示这么久（用户要求：消失前要有对应交互）
 PHASE_META = {
     PHASE_IDLE: ("circle", None, "空闲", "○"),
     PHASE_REC: ("circle.fill", (1.00, 0.30, 0.30, 1.0), "听写中", "●"),
     PHASE_PROC: ("circle.dotted", (0.30, 0.55, 1.00, 1.0), "上屏中", "◐"),
     PHASE_ERR: ("exclamationmark.circle", (1.00, 0.60, 0.10, 1.0), "未上屏", "○"),
 }
+
+
+def next_linger(want_pill: bool, last_want: bool, linger_until: float,
+                now: float, hold_s: float) -> float:
+    """收场倒计时：`want_pill` 由真变假的那一刻开始计时，返回新的到期时刻（0 = 没在计时）。
+
+    抽出来是为了能直接断言这条规则（见 tools/smoke.py）：它踩过坑——之前是在状态变化那一刻
+    就把到期时刻算好，结果「设备开机」这种（此时模型还在加载、浮窗本来就该显示）提示会被
+    后面那些 want_pill=True 的 tick 当场清掉，用户根本看不到「已开机」。
+    """
+    if want_pill:
+        return 0.0
+    if last_want:
+        return now + hold_s
+    return linger_until
 
 
 def pill_wanted(st: dict, fault_age: float, auto: bool = True) -> bool:
@@ -304,10 +320,28 @@ class TrayApp(Foundation.NSObject):
         self._audio_dirty = False      # 设备掉过线 → 下次录音前重新枚举音频设备
         self._last_unknown: tuple = ()  # 上次报过的未知键码（去重，别刷屏）
         self._woke_device = False       # 这次连接有没有给设备发过唤醒心跳
+        self._linger_text = ""          # 收场提示的文字（"" = 没有）
+        self._linger_color = None
+        self._linger_until = 0.0        # 收场倒计时的到期时刻（0 = 还没开始计时）
+        self._linger_hold = LINGER_S
+        self._last_want = False         # 上一次 tick 里「有没有正经理由显示」
+        self._pill_shown = False        # 我们自己的显隐标志（淡出期间 win.isVisible() 还是 true）
         self.min_audio_s = getattr(args, "min_audio_s", MIN_AUDIO_S)
         return self
 
     # ---------- 状态：后台线程写，主线程 tick 读 ----------
+
+    @objc.python_method
+    def _set_linger(self, text: str, color, secs: float = LINGER_S) -> None:
+        """记一条「收场」提示：等浮窗真的没有别的显示理由了，先用它顶一会儿再淡出收起。
+
+        用户要求：浮窗消失前要有一个对应的交互——「上屏中」别直接跳没了，得先显示「空闲」
+        再缩掉；设备开机也别静悄悄地就没了，先显示绿色的「已开机」。
+        注意这里只「记下来」，倒计时从 want_pill 由真变假那一刻才开始：不然像开机这种
+        （此时模型还在加载、浮窗本来就该显示）提示会被当场清掉。
+        """
+        self._linger_text, self._linger_color = text, color
+        self._linger_hold = secs
 
     @objc.python_method
     def set_state(self, **kw) -> None:
@@ -443,6 +477,7 @@ class TrayApp(Foundation.NSObject):
 
     @objc.python_method
     def on_conn(self, connected: bool, reason: str = "", power_off: bool = False) -> None:
+        prev = self.get_state()
         if not connected:
             self._audio_dirty = True      # 设备掉过线，音频设备表要重新枚举（见 _resolve_audio_device）
             self._woke_device = False     # 下次连上要重新唤醒一次
@@ -450,6 +485,12 @@ class TrayApp(Foundation.NSObject):
             self.set_state(connected=connected, reason=reason, device_off=power_off,
                            fw_version="", battery_pct=None)
             return
+        if connected is True:
+            green = AppKit.NSColor.systemGreenColor()
+            if prev["device_off"]:
+                self._set_linger("已开机", green)          # 关机→开机：先说一声再收起（用户要求）
+            elif prev["connected"] is None:
+                self._set_linger("已连接", green)          # 连接中→就绪：同理
         self.set_state(connected=connected, reason=reason, device_off=power_off)
 
     # ---------- 设备「真的能用了吗」（插回来时报「已连接」之前先过这一关） ----------
@@ -641,6 +682,7 @@ class TrayApp(Foundation.NSObject):
         if not text:
             log("结果", f"（{dur:.1f}s 没听清）")
             self.set_state(phase=PHASE_IDLE, last_text="", preview="")
+            self._set_linger("没听清", AppKit.NSColor.systemYellowColor())
             return
         if self.injector.last_newlines:
             log("换行", f"识别结果含 {self.injector.last_newlines} 个换行，"
@@ -674,6 +716,8 @@ class TrayApp(Foundation.NSObject):
                     f" = 松手→完成 {(time.monotonic() - t_release) * 1000:.0f}ms]")
         self.set_state(phase=PHASE_IDLE, last_text=text, preview="", injected=injected,
                        result_ts=time.monotonic())
+        # 上屏中→空闲：别直接跳没了，先把「空闲」亮一下再淡出（用户要求）
+        self._set_linger("空闲", AppKit.NSColor.whiteColor())
         self.flash(*(("checkmark.circle.fill", (0.25, 0.85, 0.4, 1.0))
                      if injected.startswith("已上屏")
                      else ("doc.on.clipboard", (0.8, 0.8, 0.85, 1.0))))
@@ -729,7 +773,18 @@ class TrayApp(Foundation.NSObject):
         age = time.monotonic() - st.get("result_ts", 0)
         want_pill = pill_wanted(st, age, self.pill_auto)
         fault = st["injected"].startswith("未上屏") and age < FAULT_HOLD_S
-        if want_pill:
+        # 收场提示：want_pill 由真变假的那一刻才开始倒计时，之前只是把「准备说什么」记着
+        now = time.monotonic()
+        self._linger_until = next_linger(want_pill, self._last_want, self._linger_until,
+                                         now, self._linger_hold)
+        self._last_want = want_pill
+        ling = bool(self._linger_text) and 0.0 < self._linger_until - now
+        show_pill = want_pill or ling
+        ending = self._linger_text        # 日志用：这一轮收起时的收场文字
+        if not show_pill and self._linger_until:      # 收场也结束了，清干净
+            self._linger_until = 0.0
+            self._linger_text = ""
+        if show_pill:
             # 角标：左上角固件版本、右上角电量（都来自厂商通道，设备不在线时是空的）
             ver, pct = st["fw_version"], st["battery_pct"]
             self.pill.set_meta(f"v{ver}" if ver else "", f"{pct}%" if pct is not None else "")
@@ -740,7 +795,10 @@ class TrayApp(Foundation.NSObject):
             lead = Pill.LEAD_NONE
             pulse = False
             color, text, detail = W, f"{label}", None
-            if phase == PHASE_REC:
+            if ling and not want_pill:
+                # 收场提示：已经没有正经理由显示了，但先给用户看一眼结果状态（用户要求）
+                text, color = self._linger_text, self._linger_color
+            elif phase == PHASE_REC:
                 # 状态行只放「听写中」，预览文字走下面一行——文字变长时是条子左右张开，
                 # 状态标签始终钉在正中间不动（用户要求）。
                 lead, color = Pill.LEAD_WAVE, RED
@@ -770,10 +828,13 @@ class TrayApp(Foundation.NSObject):
                 text, color = st["injected"][:30], ORANGE
                 detail = (st["reason"].partition("：")[2].strip() or None)   # 失败原因写全
             self.pill.set_status(text, color, lead, detail, pulse=pulse)
-        # 先更新内容再显示：窗口弹出来时不会闪一下上一次的旧内容
-        if want_pill != bool(self.pill.win.isVisible()):
-            self.pill.set_visible(want_pill)
-            log("悬浮条", "显示" if want_pill else "收起（空闲）")
+        # 先更新内容再显示：窗口弹出来时不会闪一下上一次的旧内容。
+        # 用我们自己的 _pill_shown 判断，不用 win.isVisible()——淡出那 0.28 秒里窗口仍然是
+        # visible，拿它比较会每 0.12 秒重发一次收起。
+        if show_pill != self._pill_shown:
+            self._pill_shown = show_pill
+            self.pill.set_visible(show_pill)
+            log("悬浮条", "显示" if show_pill else f"收起（{ending or '空闲'}）")
 
     @objc.python_method
     def flash(self, symbolic: str, tint, secs: float = 1.5) -> None:
@@ -894,6 +955,8 @@ class TrayApp(Foundation.NSObject):
         paused = not self.get_state()["paused"]
         self.set_state(paused=paused)
         log("监听", "已暂停" if paused else "已恢复")
+        if not paused:
+            self._set_linger("已恢复监听", AppKit.NSColor.systemGreenColor())
 
     def manualToggle_(self, _sender):
         if self.current_stop is None:
@@ -916,6 +979,7 @@ class TrayApp(Foundation.NSObject):
         self.pill_auto = not self.pill_auto
         if not self.pill_auto:
             self.pill.set_visible(False)
+            self._pill_shown = False
         log("悬浮条", "自动显示已开（听写/上屏/异常时出现）" if self.pill_auto else "已关闭（不再自动出现）")
 
     def reconnect_(self, _sender):
@@ -993,6 +1057,7 @@ class TrayApp(Foundation.NSObject):
         self.pill.place_bottom(self._load_pill_x())
         self.pill.set_status("启动中…", AppKit.NSColor.whiteColor(), Pill.LEAD_NONE)
         self.pill.show()
+        self._pill_shown = True          # 跟 tick 里的显隐标志对齐（tick 用自己这个判断）
 
     def applicationDidFinishLaunching_(self, _note):
         self.setup_ui()
