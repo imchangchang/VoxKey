@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxkey"
+version = "0.1.0"
+description = "按住键盘上的语音键说话，松手文字直接进当前光标（macOS 常驻）"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyobjc",           # AppKit / Quartz / AVFoundation 绑定
+    "numpy",
+    "sounddevice",      # 设备麦克风采集（CoreAudio）
+    "sherpa-onnx",      # 离线识别（funasr-nano-int8）
+]
+
+[project.optional-dependencies]
+tools = ["pyperclip"]   # tools/ptt_demo.py 的剪贴板上屏路径
+
+[project.scripts]
+voxkey = "voxkey.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
