@@ -18,25 +18,32 @@
 - **触发走设备自己的 HID 报文**：不需要全局热键、不依赖厂商 Studio 软件；代价是读设备要考虑独占（见下）。
 - **长语音不吃亏**：模型上下文装不下长句就按 22 秒切段，但**录音期间就把录满的段解掉**，
   松手只剩下最后一段要解（实测 44 秒音频：松手后解码从 3176ms 降到 218ms）。
-- **悬浮条动效**：固定尺寸透明窗口 + Core Animation 弹簧动画 + 裁剪层（照开源刘海应用的做法，
-  见 `docs/` 与提交历史），动画在系统渲染服务里跑，Python 主线程不参与动画帧。
+- **悬浮条动效**：固定尺寸透明窗口 + Core Animation 弹簧动画 + 裁剪层（照开源刘海应用 boring.notch /
+  DynamicNotchKit / NotchDrop 的做法），动画在系统渲染服务里跑，Python 主线程不参与动画帧。
+  为什么这么做、踩过哪些坑，都写在 `src/voxkey/pill.py` 的模块注释里。
 
 ## 装依赖
 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e .                 # 软件本体
-.venv/bin/pip install -e '.[tools]'        # 另加命令行 demo 需要的 pyperclip
+.venv/bin/pip install -e '.[tools]'        # 另加命令行 demo 要的 pyperclip + pynput
 ```
+
+本机没装 `python3.12`（系统只有 3.9），现有的 `.venv` 是用 uv 建的——uv 建的 venv 不带 pip，
+要补装包先 `.venv/bin/python -m ensurepip`。新机器上装个 uv 直接 `uv venv --python 3.12 .venv` 更省事。
 
 模型不进仓库（每个 1~3GB），下载到 `models/`（默认目录，已被 gitignore），或用环境变量
-`VOXKEY_MODELS_DIR` 指到别处。当前常驻用的是 `funasr-nano-int8`：
+`VOXKEY_MODELS_DIR` 指到别处。常驻软件只认 `funasr-nano-int8`：
 
+```bash
+curl -L -o /tmp/funasr.tar.bz2 \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2
+tar -xjf /tmp/funasr.tar.bz2 -C models/     # 解出来约 972MB，tokenizer（Qwen3-0.6B）在里面
 ```
-models/
-  sherpa-onnx-funasr-nano-int8-2025-12-30/
-  Qwen3-0.6B/ ...
-```
+
+`tools/verify/run_verify.py` 做模型质量对比还需要 sense-voice / zipformer / paraformer 那几个，
+名字见 `src/voxkey/models.py` 的 `REGISTRY`；软件本体用不到。
 
 ## 跑起来
 
@@ -49,7 +56,7 @@ PYTHONPATH=src .venv/bin/python -m voxkey.app --no-device # 不读按键，用�
 
 | 权限 | 用途 | 没有会怎样 |
 |---|---|---|
-| 辅助功能 | 合成按键上屏 + AX 直写 + 全局热键 | 写不进输入框（会明说「未上屏」） |
+| 辅助功能 | 合成按键上屏、AX 直写、读前台窗口与焦点控件 | 写不进输入框（会明说「未上屏」） |
 | 输入监控 | 读设备（AU05）自己的 HID 按键报文 | 按语音键没反应 |
 | 麦克风 | 采设备音频 | 录不到声音 |
 
@@ -67,7 +74,7 @@ src/voxkey/
   models.py         模型注册表与加载（默认取仓库根 models/，可用 VOXKEY_MODELS_DIR 覆盖）
   device/           设备层：HID 报文读取(keyreader)、厂商通道协议(protocol)、设备对象(device)、监视脚本(monitor)
 tools/
-  ptt_demo.py       命令行 demo：不装托盘也能跑通「按住说话 → 剪贴板上屏」，验证硬件链路用
+  ptt_demo.py       命令行 demo：不装托盘也能跑通「按住说话 → 剪贴板上屏」（要装 .[tools]），验证硬件链路用
   device_probe.py   设备探针：读按键、改键位映射、诊断（改完要拔插接收器才生效）
   verify/           模型质量对比：候选模型 × 语料，输出 CER / 首字延迟 / RTF
 ```
