@@ -42,6 +42,7 @@ import Foundation  # noqa: E402
 import Quartz  # noqa: E402
 
 from voxkey.audio import Recorder, find_input_device
+from voxkey.device import protocol as P
 from voxkey.device.device import VibeKey, VibeKeyNotFound
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, MOD_CTRL,
                                      MOD_OPT, DeviceKeyReader, find_keyboard_path)
@@ -67,6 +68,9 @@ SPINNER = "◐◓◑◒"
 # 取消=退格」在前台应用里完全没反应。报文既然只到我们手里，就由我们转交给系统。
 ROUTE_KEYS = {0x28: 36,    # HID 0x28 Enter       → macOS vk 36 (Return)
               0x2A: 51}    # HID 0x2A Backspace   → macOS vk 51 (Delete/退格)
+
+# 我们认识的设备键码；其余一律当未知（只记日志，不做动作），方便分辨设备是不是发了怪码
+KNOWN_KEYCODES = {KC_VOICE, KC_ESC, KC_F9, KC_F11, *ROUTE_KEYS}
 
 MIN_AUDIO_S = 0.5       # 短于这个时长直接丢（用户要求：<0.5s 忽略，避免静音被模型脑补出字）
 SILENCE_RMS = 0.002     # 音量低于此值视为「没说话」——实测 0.0008 的 0.2s 片段会被识别成「嗯」
@@ -147,13 +151,22 @@ class SingleInstance:
 # ---------------------------------------------------------------- 设备看守
 
 class KeySupervisor(threading.Thread):
-    """看着 AU05 的键盘集合：掉线 → 标记未连接并停 reader，插回来 → 自动重启。"""
+    """看着 AU05 的键盘集合：掉线 → 标记未连接并停 reader，插回来 → 自动重启。
 
-    def __init__(self, on_key, on_conn, stop_event: threading.Event):
+    「插回来」不等于「能用了」：键盘集合能打开只是拿到了句柄，实测插拔接收器之后还有约 3.6 秒
+    设备一个按键报文都不发（固件/音频子系统还没起来）。所以打开之后先等 `ready_probe` 成立
+    再报「已连接」——用户在提示消失的那一刻按键就必须能用（用户要求）。
+    """
+
+    READY_TIMEOUT_S = 8.0    # 等设备证明自己可用的上限；超时就先按已连接处理，别把提示挂死
+    READY_SETTLE_S = 1.0     # 集合打开后至少等这么久再判就绪（纯保险）
+
+    def __init__(self, on_key, on_conn, stop_event: threading.Event, ready_probe=None):
         super().__init__(daemon=True)
         self.on_key = on_key
         self.on_conn = on_conn
         self.stop_event = stop_event
+        self.ready_probe = ready_probe        # () -> bool：设备真的能用了么（见 TrayApp._device_ready）
         self.reader: DeviceKeyReader | None = None
         self._dropped_reason: str | None = None   # 同一条掉线原因只报一次，别每 2 秒刷一遍日志
 
@@ -170,12 +183,30 @@ class KeySupervisor(threading.Thread):
             if self.reader is None:
                 try:
                     self.reader = DeviceKeyReader(self.on_key).start()
-                    self._dropped_reason = None
-                    self.on_conn(True)
-                    log("设备", "键盘集合已打开，语音键监听中")
                 except Exception as e:
                     self.on_conn(False, f"打不开：{e}")
+                    self.stop_event.wait(2.0)
+                    continue
+                self.on_conn(None)                # 句柄有了，但设备还没证明自己能发按键
+                log("设备", "键盘集合已打开，等设备就绪…")
+                t0 = time.monotonic()
+                ok = self._wait_ready()
+                ms = (time.monotonic() - t0) * 1000
+                self._dropped_reason = None
+                self.on_conn(True)
+                log("设备", f"就绪（{'探测通过' if ok else '探测超时，先按就绪处理'}，用时 {ms:.0f}ms），"
+                            f"语音键监听中")
             self.stop_event.wait(2.0)
+
+    def _wait_ready(self) -> bool:
+        """等到 ready_probe 说「能用」。没有探针就只等 settle。"""
+        t0 = time.monotonic()
+        while not self.stop_event.is_set() and time.monotonic() - t0 < self.READY_TIMEOUT_S:
+            settled = (time.monotonic() - t0) >= self.READY_SETTLE_S
+            if settled and (self.ready_probe is None or self.ready_probe()):
+                return True
+            self.stop_event.wait(0.25)
+        return False
 
     def _drop(self, reason: str) -> None:
         had_reader = self.reader is not None
@@ -225,6 +256,8 @@ class TrayApp(Foundation.NSObject):
         self._routed = set()
         self.pill_auto = True          # 悬浮条自动显示（空闲收起）；菜单里可以关掉
         self._audio_dirty = False      # 设备掉过线 → 下次录音前重新枚举音频设备
+        self._last_unknown: tuple = ()  # 上次报过的未知键码（去重，别刷屏）
+        self._woke_device = False       # 这次连接有没有给设备发过唤醒心跳
         self.min_audio_s = getattr(args, "min_audio_s", MIN_AUDIO_S)
         return self
 
@@ -254,6 +287,13 @@ class TrayApp(Foundation.NSObject):
         """
         if self.args.debug_keys:
             log("报文", f"mods=0x{mods:02x} keys={[hex(k) for k in keys]}")
+        unknown = tuple(k for k in keys if k not in KNOWN_KEYCODES)
+        if unknown and unknown != self._last_unknown:
+            # 未知键码一直记（不用 --debug-keys）：插拔接收器后出现过 0xde 这种怪码，
+            # 得能从日志里分清「设备还没就绪、根本没发报文」和「发了但键码不认识」。
+            log("报文", f"未知键码 {[hex(k) for k in unknown]}（mods=0x{mods:02x} "
+                        f"keys={[hex(k) for k in keys]}）")
+        self._last_unknown = unknown
         st = self.get_state()
         ptt = (KC_VOICE in keys
                or (KC_F9 in keys and (mods & (MOD_CTRL | MOD_OPT | MOD_CMD)) ==
@@ -359,7 +399,51 @@ class TrayApp(Foundation.NSObject):
     def on_conn(self, connected: bool, reason: str = "") -> None:
         if not connected:
             self._audio_dirty = True      # 设备掉过线，音频设备表要重新枚举（见 _resolve_audio_device）
+            self._woke_device = False     # 下次连上要重新唤醒一次
         self.set_state(connected=connected, reason=reason)
+
+    # ---------- 设备「真的能用了吗」（插回来时报「已连接」之前先过这一关） ----------
+
+    @objc.python_method
+    def _vendor_alive(self) -> bool:
+        """厂商通道能应答吗——固件起来了才会回我们的加密帧。
+
+        顺便发一帧心跳：协议里 `heartbeat` 的说明就是「试着唤醒假死的厂商口」，
+        而 `getStandbyTime` 说明「待机超时后厂商口不响应」——插拔之后设备很可能就在这个状态，
+        不敲一下它会一直不应答（也就没法用它判断设备到底起没起来）。
+        """
+        try:
+            with VibeKey() as vk:
+                if not self._woke_device:
+                    self._woke_device = True
+                    vk.send(P.build_frame(0x06, 0x01, 0x23, 0x00))
+                return vk.version() is not None
+        except Exception:
+            return False
+
+    @objc.python_method
+    def _audio_device_present(self) -> bool:
+        """AU05 的录音设备在 CoreAudio 里了吗。
+
+        必须先重新枚举 PortAudio：插拔之后它手里那张设备表还是旧的，不重载的话这里永远返回
+        「在」（旧表里就有 AU05），探测就失去意义。录音进行中不动它（重载会废掉正在录的流）。
+        """
+        if self.current_stop is not None:
+            return True
+        self._reload_audio_devices()
+        return find_input_device(self.args.device) is not None
+
+    @objc.python_method
+    def _device_ready(self) -> bool:
+        """设备真的能用了么。键盘集合「能打开」不算——那只是个句柄。
+
+        实测（插拔接收器）：集合打开之后约 3.6 秒里设备一个按键报文都不发，用户正好在这段
+        时间按键就是「按了没反应」。这里要求①厂商通道应答②AU05 的录音设备已经在 CoreAudio 里，
+        两条都成立才报「已连接」、悬浮条才收起——用户看到提示消失就能马上用。
+        """
+        if not self._vendor_alive():
+            return False
+        return self._audio_device_present()
 
     # ---------- 一次说话的全流程（后台线程） ----------
 
@@ -547,7 +631,7 @@ class TrayApp(Foundation.NSObject):
         self.set_icon(sf, tint)
 
         # 菜单文案
-        conn = {True: "已连接", False: "未连接", None: "探测中"}[st["connected"]]
+        conn = {True: "已连接", False: "未连接", None: "连接中…"}[st["connected"]]
         mic = {True: "已授权", False: "未授权（去授权）", None: "检查中"}[st["mic_ok"]]
         post = {True: "已授权", False: "未授权（现在写不进输入框）", None: "检查中"}[st["post_ok"]]
         self.mi_status.setTitle_(f"{glyph} {label} · 设备{conn} · {st['device_info']}")
@@ -579,6 +663,10 @@ class TrayApp(Foundation.NSObject):
                 # 不在这里截断：能放多少行由 pill 按实际行高决定（放不下就显示最近的尾巴），
                 # 以前这里硬切 [:60]（正好两行），长语音说到两行就再也不长了。
                 detail = (st["preview"] or None)
+            elif st["connected"] is None:
+                # 句柄拿到了但设备还没证明自己能发按键：这时候提示不能消失，
+                # 否则用户以为能用了，按下去却什么都没发生（见 _device_ready）
+                text, color = "设备连接中…", YELLOW
             elif phase == PHASE_PROC:
                 # 上屏中不再重复显示转写文本（用户要求）：缩小成一个小条「上屏中」就够了。
                 # 呼吸是这一档唯一的动效，pulse=True 才让 pill 的 30fps 定时器开着。
@@ -825,7 +913,8 @@ class TrayApp(Foundation.NSObject):
     def applicationDidFinishLaunching_(self, _note):
         self.setup_ui()
         if not self.args.no_device:
-            self.supervisor = KeySupervisor(self.on_key_state, self.on_conn, self.stop_event)
+            self.supervisor = KeySupervisor(self.on_key_state, self.on_conn, self.stop_event,
+                                            ready_probe=self._device_ready)
             self.supervisor.start()
         else:
             self.set_state(connected=False, reason="--no-device 模式")
