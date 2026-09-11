@@ -158,17 +158,24 @@ class KeySupervisor(threading.Thread):
     再报「已连接」——用户在提示消失的那一刻按键就必须能用（用户要求）。
     """
 
-    READY_TIMEOUT_S = 8.0    # 等设备证明自己可用的上限；超时就先按已连接处理，别把提示挂死
+    READY_TIMEOUT_S = 5.0    # 等设备证明自己可用的上限；超时按「设备不在线」处理（开机会被周期探测纠正）
     READY_SETTLE_S = 1.0     # 集合打开后至少等这么久再判就绪（纯保险）
+    POWER_PROBE_EVERY_S = 3.0    # 周期探测设备本体的间隔（厂商通道答不答话）
+    POWER_FAILS_TO_OFF = 2       # 连续几次不应答才算「关机」，防单次抖动误报
 
-    def __init__(self, on_key, on_conn, stop_event: threading.Event, ready_probe=None):
+    def __init__(self, on_key, on_conn, stop_event: threading.Event, ready_probe=None,
+                 device_alive=None):
         super().__init__(daemon=True)
         self.on_key = on_key
         self.on_conn = on_conn
         self.stop_event = stop_event
         self.ready_probe = ready_probe        # () -> bool：设备真的能用了么（见 TrayApp._device_ready）
+        self.device_alive = device_alive      # () -> bool：设备本体（键盘）还答话吗
         self.reader: DeviceKeyReader | None = None
         self._dropped_reason: str | None = None   # 同一条掉线原因只报一次，别每 2 秒刷一遍日志
+        self._device_off = False
+        self._power_fails = 0
+        self._last_power_probe = 0.0
 
     def run(self) -> None:
         while not self.stop_event.is_set():
@@ -192,11 +199,47 @@ class KeySupervisor(threading.Thread):
                 t0 = time.monotonic()
                 ok = self._wait_ready()
                 ms = (time.monotonic() - t0) * 1000
+                if ok:
+                    self._dropped_reason = None
+                    self._device_off = False
+                    self.on_conn(True)
+                    log("设备", f"就绪（探测通过，用时 {ms:.0f}ms），语音键监听中")
+                else:
+                    # 接收器在、句柄也开得了，唯一解释就是设备本体没开机（或没电了）。
+                    # 不关 reader：设备一开机，同一个句柄就能重新收到按键。
+                    self._device_off = True
+                    self.on_conn(False, "设备已关机", True)
+                    log("设备", f"打开句柄用了 {ms:.0f}ms，但设备本体不应答——关机/没电？等它开机")
+            self._check_device_power()
+            self.stop_event.wait(2.0)
+
+    def _check_device_power(self) -> None:
+        """周期性地问一句「设备本体还在吗」。
+
+        为什么不能靠 HID 枚举/键盘集合/CoreAudio 判断：实测「接收器插着但键盘关机」时，
+        HID 里 if2/if3 都还在、键盘集合照样能打开、CoreAudio 里 AU05 也还在——三者全都说
+        「在」，只有厂商通道不应答；键盘一开机，厂商通道立刻回 version 和电量。
+        所以判据只能是厂商通道答不答话。
+        """
+        if self.device_alive is None or self.reader is None:
+            return
+        now = time.monotonic()
+        if now - self._last_power_probe < self.POWER_PROBE_EVERY_S:
+            return
+        self._last_power_probe = now
+        if self.device_alive():
+            self._power_fails = 0
+            if self._device_off:
+                self._device_off = False
                 self._dropped_reason = None
                 self.on_conn(True)
-                log("设备", f"就绪（{'探测通过' if ok else '探测超时，先按就绪处理'}，用时 {ms:.0f}ms），"
-                            f"语音键监听中")
-            self.stop_event.wait(2.0)
+                log("设备", "设备本体应答了（开机了），语音键监听中")
+            return
+        self._power_fails += 1
+        if self._power_fails >= self.POWER_FAILS_TO_OFF and not self._device_off:
+            self._device_off = True
+            self.on_conn(False, "设备已关机", True)
+            log("设备", "设备本体不应答（关机/没电）——接收器还插着，等你开机")
 
     def _wait_ready(self) -> bool:
         """等到 ready_probe 说「能用」。没有探针就只等 settle。"""
@@ -216,6 +259,8 @@ class KeySupervisor(threading.Thread):
             except Exception:
                 pass
             self.reader = None
+        self._device_off = False          # 接收器都没了，「设备关机」这个判断已经没意义
+        self._power_fails = 0
         # 首次掉线（包括「启动时设备就没插」，这时本来就没有 reader）必须报出去：
         # 只报 had_reader 的话 connected 会一直是 None，菜单永远显示「设备探测中」。
         if had_reader or self._dropped_reason != reason:
@@ -249,7 +294,7 @@ class TrayApp(Foundation.NSObject):
         self.state = {
             "phase": PHASE_IDLE, "connected": None, "reason": "", "paused": False,
             "last_text": "", "preview": "", "device_info": "设备信息读取中…",
-            "mic_ok": None, "post_ok": None, "injected": "",
+            "mic_ok": None, "post_ok": None, "injected": "", "device_off": False,
         }
         self.gesture_start = None
         self.utt_no = 0
@@ -396,30 +441,38 @@ class TrayApp(Foundation.NSObject):
         threading.Thread(target=self.handle_utterance, args=(stop_ev,), daemon=True).start()
 
     @objc.python_method
-    def on_conn(self, connected: bool, reason: str = "") -> None:
+    def on_conn(self, connected: bool, reason: str = "", power_off: bool = False) -> None:
         if not connected:
             self._audio_dirty = True      # 设备掉过线，音频设备表要重新枚举（见 _resolve_audio_device）
             self._woke_device = False     # 下次连上要重新唤醒一次
-        self.set_state(connected=connected, reason=reason)
+        self.set_state(connected=connected, reason=reason, device_off=power_off)
 
     # ---------- 设备「真的能用了吗」（插回来时报「已连接」之前先过这一关） ----------
 
     @objc.python_method
     def _vendor_alive(self) -> bool:
-        """厂商通道能应答吗——固件起来了才会回我们的加密帧。
-
-        顺便发一帧心跳：协议里 `heartbeat` 的说明就是「试着唤醒假死的厂商口」，
-        而 `getStandbyTime` 说明「待机超时后厂商口不响应」——插拔之后设备很可能就在这个状态，
-        不敲一下它会一直不应答（也就没法用它判断设备到底起没起来）。
-        """
+        """厂商通道能应答吗——设备本体（键盘）在线才会回我们的加密帧。"""
         try:
             with VibeKey() as vk:
-                if not self._woke_device:
-                    self._woke_device = True
-                    vk.send(P.build_frame(0x06, 0x01, 0x23, 0x00))
                 return vk.version() is not None
         except Exception:
             return False
+
+    @objc.python_method
+    def _wake_device(self) -> None:
+        """发一帧心跳：协议表里这条命令就是「试着唤醒假死的厂商口」。"""
+        try:
+            with VibeKey() as vk:
+                vk.send(P.build_frame(0x06, 0x01, 0x23, 0x00))
+        except Exception as e:
+            log("设备", f"心跳没发出去：{e}")
+
+    @objc.python_method
+    def _device_power_probe(self) -> bool:
+        """设备本体还在线吗（看守线程周期性问）。录音中不打扰，直接当在线。"""
+        if self.current_stop is not None:
+            return True
+        return self._vendor_alive()
 
     @objc.python_method
     def _audio_device_present(self) -> bool:
@@ -441,6 +494,9 @@ class TrayApp(Foundation.NSObject):
         时间按键就是「按了没反应」。这里要求①厂商通道应答②AU05 的录音设备已经在 CoreAudio 里，
         两条都成立才报「已连接」、悬浮条才收起——用户看到提示消失就能马上用。
         """
+        if not self._woke_device:
+            self._woke_device = True
+            self._wake_device()          # 先敲一下（设备待机时厂商口不响应）
         if not self._vendor_alive():
             return False
         return self._audio_device_present()
@@ -619,6 +675,10 @@ class TrayApp(Foundation.NSObject):
         sf, tint, label, glyph = PHASE_META[phase]
         if st["paused"]:
             label, glyph = "已暂停", "○"
+        elif st["device_off"]:
+            # 接收器插着但设备本体关机：HID 枚举、键盘集合、CoreAudio 全都说「在」，
+            # 只有厂商通道不应答——见 KeySupervisor._check_device_power
+            label, glyph = "设备已关机", "○"
         elif st["connected"] is False:
             label, glyph = "设备未连接", "○"
         elif phase == PHASE_ERR:                     # 未上屏：把原因写出来
@@ -914,7 +974,8 @@ class TrayApp(Foundation.NSObject):
         self.setup_ui()
         if not self.args.no_device:
             self.supervisor = KeySupervisor(self.on_key_state, self.on_conn, self.stop_event,
-                                            ready_probe=self._device_ready)
+                                            ready_probe=self._device_ready,
+                                            device_alive=self._device_power_probe)
             self.supervisor.start()
         else:
             self.set_state(connected=False, reason="--no-device 模式")

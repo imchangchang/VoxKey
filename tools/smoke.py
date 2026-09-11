@@ -171,7 +171,8 @@ def pill_wanted_table() -> str:
     from voxkey.app import FAULT_HOLD_S, pill_wanted
 
     base = {"phase": "idle", "connected": True, "paused": False, "post_ok": True,
-            "mic_ok": True, "injected": "", "reason": "", "preview": "", "last_text": ""}
+            "mic_ok": True, "injected": "", "reason": "", "preview": "", "last_text": "",
+            "device_off": False}
     # (说明, 状态补丁, 距上次结果多久, 期望可见, auto)
     cases = [
         ("空闲且一切正常 → 收起", {}, 99.0, False, True),
@@ -179,6 +180,7 @@ def pill_wanted_table() -> str:
         ("上屏中 → 出现", {"phase": "proc"}, 99.0, True, True),
         ("设备掉线 → 出现（指示没插入）", {"connected": False}, 99.0, True, True),
         ("设备还在探测 → 出现", {"connected": None}, 99.0, True, True),
+        ("接收器插着但设备关机 → 出现", {"connected": False, "device_off": True}, 99.0, True, True),
         ("暂停监听 → 出现", {"paused": True}, 99.0, True, True),
         ("缺辅助功能权限 → 出现", {"post_ok": False}, 99.0, True, True),
         ("麦克风没权限 → 出现", {"mic_ok": False}, 99.0, True, True),
