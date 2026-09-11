@@ -70,12 +70,31 @@ ROUTE_KEYS = {0x28: 36,    # HID 0x28 Enter       → macOS vk 36 (Return)
 
 MIN_AUDIO_S = 0.5       # 短于这个时长直接丢（用户要求：<0.5s 忽略，避免静音被模型脑补出字）
 SILENCE_RMS = 0.002     # 音量低于此值视为「没说话」——实测 0.0008 的 0.2s 片段会被识别成「嗯」
+FAULT_HOLD_S = 3.0      # 「未上屏」提示在悬浮条上留多久（用户要求：空闲就收起来）
 PHASE_META = {
     PHASE_IDLE: ("circle", None, "空闲", "○"),
     PHASE_REC: ("circle.fill", (1.00, 0.30, 0.30, 1.0), "听写中", "●"),
     PHASE_PROC: ("circle.dotted", (0.30, 0.55, 1.00, 1.0), "上屏中", "◐"),
     PHASE_ERR: ("exclamationmark.circle", (1.00, 0.60, 0.10, 1.0), "未上屏", "○"),
 }
+
+
+def pill_wanted(st: dict, fault_age: float, auto: bool = True) -> bool:
+    """悬浮条该不该出现（用户要求：空闲时不占屏幕，只在「有事要说」的时候弹出来）。
+
+    出现的情况：听写中 / 上屏中、设备掉线或还在探测、暂停了、权限缺失、
+    模型加载失败这类持续错误、以及刚上屏失败的那几秒。
+    抽成纯函数是为了能直接断言这个真值表（见 tools/smoke.py），不用起整个 App。
+    """
+    if not auto:
+        return False
+    return bool(
+        st["phase"] in (PHASE_REC, PHASE_PROC)
+        or st["phase"] == PHASE_ERR                         # 模型加载失败、麦克风打不开
+        or st["paused"]                                     # 用户主动停了监听，得让人看见
+        or st["connected"] in (False, None)                 # 设备掉线 / 还在探测
+        or not st["post_ok"] or not st["mic_ok"]            # 权限缺失（None = 还在查）
+        or (st["injected"].startswith("未上屏") and fault_age < FAULT_HOLD_S))
 
 
 def log(tag: str, msg: str) -> None:
@@ -204,6 +223,7 @@ class TrayApp(Foundation.NSObject):
         self.gesture_start = None
         self.utt_no = 0
         self._routed = set()
+        self.pill_auto = True          # 悬浮条自动显示（空闲收起）；菜单里可以关掉
         self.min_audio_s = getattr(args, "min_audio_s", MIN_AUDIO_S)
         return self
 
@@ -501,15 +521,19 @@ class TrayApp(Foundation.NSObject):
         self.mi_toggle.setTitle_("恢复监听" if st["paused"] else "暂停监听")
         self.mi_mic.setTitle_(f"权限：麦克风 {mic}")
         self.mi_post.setTitle_(f"权限：辅助功能（AX 直写用）{post}")
+        self.mi_pill.setTitle_(f"悬浮状态条：{'自动（空闲收起）' if self.pill_auto else '已关闭'}")
 
-        # 悬浮条：引导元素（圆点/波形/呼吸）由 pill 自己画，文字里不再塞 ○●◐ 和转圈字符
-        if self.pill.win.isVisible():
+        # 悬浮条：空闲时收起来不占位置（用户要求），只在「有事要说」的时候出现。
+        age = time.monotonic() - st.get("result_ts", 0)
+        want_pill = pill_wanted(st, age, self.pill_auto)
+        fault = st["injected"].startswith("未上屏") and age < FAULT_HOLD_S
+        if want_pill:
+            # 引导元素（波形/呼吸）由 pill 自己画，文字里不再塞 ○●◐ 和转圈字符
             W, RED = AppKit.NSColor.whiteColor(), AppKit.NSColor.systemRedColor()
             BLUE, YELLOW = AppKit.NSColor.systemBlueColor(), AppKit.NSColor.systemYellowColor()
             ORANGE = AppKit.NSColor.systemOrangeColor()
             lead = Pill.LEAD_NONE
             pulse = False
-            age = time.monotonic() - st.get("result_ts", 0)
             color, text, detail = W, f"{label}", None
             if phase == PHASE_REC:
                 # 状态行只放「听写中」，预览文字走下面一行——文字变长时是条子左右张开，
@@ -526,11 +550,18 @@ class TrayApp(Foundation.NSObject):
                 color = YELLOW
             elif st["connected"] is False:
                 color = YELLOW
+            elif st["phase"] == PHASE_ERR:
+                # 持续的错误态（模型没下载完、麦克风打不开）：把原因写出来，否则只有「未上屏」三个字
+                text, color, detail = "上屏不可用", ORANGE, (st["reason"] or None)
             elif not st["post_ok"]:
-                text, color = "空闲 · 缺辅助功能权限", ORANGE
-            elif st["injected"].startswith("未上屏") and age < 3.0:
+                text, color = "缺辅助功能权限", ORANGE
+            elif fault:
                 text, color = st["injected"][:30], ORANGE
             self.pill.set_status(text, color, lead, detail, pulse=pulse)
+        # 先更新内容再显示：窗口弹出来时不会闪一下上一次的旧内容
+        if want_pill != bool(self.pill.win.isVisible()):
+            self.pill.set_visible(want_pill)
+            log("悬浮条", "显示" if want_pill else "收起（空闲）")
 
     @objc.python_method
     def flash(self, symbolic: str, tint, secs: float = 1.5) -> None:
@@ -669,9 +700,11 @@ class TrayApp(Foundation.NSObject):
         self.set_state(last_text=text, injected=injected, result_ts=time.monotonic())
 
     def togglePill_(self, _sender):
-        visible = not self.pill.win.isVisible()
-        self.pill.set_visible(visible)
-        self.mi_pill.setTitle_("隐藏悬浮状态条" if visible else "显示悬浮状态条")
+        """开关「自动显示」：关掉之后悬浮条不再自己弹出来（空闲本来就收起了，这是个逃生开关）。"""
+        self.pill_auto = not self.pill_auto
+        if not self.pill_auto:
+            self.pill.set_visible(False)
+        log("悬浮条", "自动显示已开（听写/上屏/异常时出现）" if self.pill_auto else "已关闭（不再自动出现）")
 
     def reconnect_(self, _sender):
         if self.supervisor:
@@ -732,7 +765,7 @@ class TrayApp(Foundation.NSObject):
         self.mi_manual = add("手动开始/结束说话", "manualToggle:")
         self.mi_reconnect = add("重新连接设备", "reconnect:")
         self.mi_testinject = add("测试上屏（往当前输入框写一行测试文本）", "testInject:")
-        self.mi_pill = add("显示悬浮状态条", "togglePill:")
+        self.mi_pill = add("悬浮状态条：自动（空闲收起）", "togglePill:")
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
         self.mi_mic = add("权限：麦克风 …", "openMic:")
         self.mi_post = add("权限：辅助功能（上屏用）…", "openAccessibility:")

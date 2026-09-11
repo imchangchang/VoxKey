@@ -166,6 +166,66 @@ def pill_long_preview() -> str:
     return f"短句原样显示；{len(long_text)} 字裁到 {kept} 字（保留尾部）"
 
 
+def pill_wanted_table() -> str:
+    """悬浮条该不该出现：真值表断言（用户要求——空闲收起不占位置，听写/上屏/异常才出现）。"""
+    from voxkey.app import FAULT_HOLD_S, pill_wanted
+
+    base = {"phase": "idle", "connected": True, "paused": False, "post_ok": True,
+            "mic_ok": True, "injected": "", "reason": "", "preview": "", "last_text": ""}
+    # (说明, 状态补丁, 距上次结果多久, 期望可见, auto)
+    cases = [
+        ("空闲且一切正常 → 收起", {}, 99.0, False, True),
+        ("听写中 → 出现", {"phase": "rec"}, 99.0, True, True),
+        ("上屏中 → 出现", {"phase": "proc"}, 99.0, True, True),
+        ("设备掉线 → 出现（指示没插入）", {"connected": False}, 99.0, True, True),
+        ("设备还在探测 → 出现", {"connected": None}, 99.0, True, True),
+        ("暂停监听 → 出现", {"paused": True}, 99.0, True, True),
+        ("缺辅助功能权限 → 出现", {"post_ok": False}, 99.0, True, True),
+        ("麦克风没权限 → 出现", {"mic_ok": False}, 99.0, True, True),
+        ("模型加载失败 → 出现", {"phase": "err"}, 99.0, True, True),
+        ("刚上屏失败 → 出现一会儿", {"injected": "未上屏：没有辅助功能权限"}, 1.0, True, True),
+        ("上屏失败已过去 → 收起",
+         {"injected": "未上屏：没有辅助功能权限"}, FAULT_HOLD_S + 1.0, False, True),
+        ("菜单里关掉自动显示 → 永不出现", {"phase": "rec"}, 0.0, False, False),
+    ]
+    fails = []
+    for name, patch, age, want, auto in cases:
+        got = pill_wanted({**base, **patch}, age, auto)
+        if got != want:
+            fails.append(f"{name}：期望 {want} 实得 {got}")
+    if fails:
+        raise AssertionError("；".join(fails))
+    return f"{len(cases)} 条规则全对"
+
+
+def pill_show_hide() -> str:
+    """收起再显示之后，波形定时器必须自己起来（隐藏期间 set_status 建不了它）。"""
+    import AppKit
+    from voxkey import pill as P
+
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    p = P.Pill.alloc().initWithHandler_(lambda: None)
+    p.place_bottom(None)
+    p.show()
+    p.hide()
+    if p.win.isVisible():
+        raise AssertionError("hide() 之后窗口还可见")
+    # 隐藏状态下切到「听写中」：这时窗口还没出来，定时器不该建
+    p.set_status("听写中", AppKit.NSColor.systemRedColor(), P.Pill.LEAD_WAVE, "今天下午三点")
+    if p._timer is not None:
+        raise AssertionError("窗口不可见时不该起 30fps 定时器")
+    p.show()
+    if not p.win.isVisible():
+        raise AssertionError("show() 之后窗口还不可见")
+    if p._timer is None:
+        raise AssertionError("重新显示后波形定时器没起来（波形会冻住）")
+    p.hide()
+    if p._timer is not None:
+        raise AssertionError("收起后定时器没停")
+    return "隐藏时不建定时器；重新显示后自己起来；收起时停掉"
+
+
 def model_ok() -> str:
     from voxkey.models import MODELS, load_recognizer
     if not MODELS.is_dir():
@@ -191,6 +251,8 @@ def main() -> int:
     ok &= check("包导入", imports_ok)
     ok &= check("悬浮条几何断言", pill_geometry)
     ok &= check("长语音预览裁剪", pill_long_preview)
+    ok &= check("悬浮条显示规则", pill_wanted_table)
+    ok &= check("悬浮条收起再显示", pill_show_hide)
     if args.no_model:
         print(f"{DIM}— 跳过模型加载{END}")
     else:

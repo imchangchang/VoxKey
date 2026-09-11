@@ -465,6 +465,10 @@ class Pill(NSObject):
         self.win.orderFrontRegardless()
         self._place_window()
         self._apply()
+        # 隐藏期间 set_status 建的定时器会被 isVisible() 挡掉（那时窗口还没出来），
+        # 所以显示之后要按当前状态补一次——不然「听写中」的波形是冻住的。
+        if self._lead == self.LEAD_WAVE or self._pulsing:
+            self._ensure_timer()
 
     @objc.python_method
     def hide(self) -> None:
