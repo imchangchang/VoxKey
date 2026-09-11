@@ -176,6 +176,20 @@ class Recorder:
         return _join_parts([self.finalized_text, self.decode_rest(samples)])
 
     PREVIEW_WINDOW_S = 20.0  # 预览只看最近这段：模型上下文（512 token ≈ 28s）放不下更长的
+    PREVIEW_RATE = 14.0      # 模型解码速度（倍实时，实测：4s 287ms / 8s 597ms / 20s 1464ms）
+
+    def preview_interval(self) -> float:
+        """下一轮预览至少隔多久再踢。
+
+        解码耗时是**线性**于音频长度的（见 PREVIEW_RATE），而这里原来写死 0.8 秒踢一次、
+        每次都要重解整个 20 秒尾巴（1.46 秒）——解码器几乎一直忙着、大量轮次被直接跳过，
+        表现就是用户说的「越说越卡、预览的进度随语音时长线性变差」。按上一轮实测耗时来定间隔，
+        踢了也白踢的那些轮次就没了（忙的时候本来也会被 _preview_busy 挡掉）。
+
+        上限 3 秒是保险：机器负载高的时候同一段音频能慢好几倍（实测同一输入 0.54s vs 3.44s），
+        没有上限的话一轮慢了会把后面的间隔也顶得很长，预览就彻底停住了。
+        """
+        return max(PREVIEW_INTERVAL, min(self.last_preview_ms / 1000.0 * 1.25, 3.0))
 
     def kick_preview(self) -> None:
         if self.is_busy and self.is_busy():
@@ -192,23 +206,28 @@ class Recorder:
                 ok, sec, peak = has_speech(self.samples)
                 if not ok:
                     return
-                # 有满段就先定稿（这一轮不再刷尾巴预览，避免同一轮解两次把解码器占满）
-                if self._finalize_closed():
-                    text = self.finalized_text
-                else:
-                    rest = self.samples[self.finalized_n:]
-                    part = self.decoder.decode(tail_window(rest, self.PREVIEW_WINDOW_S))
-                    text = _join_parts([self.finalized_text, part])
-                self.last_preview_ms = (time.monotonic() - t0) * 1000
+                # 这一轮**永远**是「已定稿 + 尾巴」，不能因为刚定稿了一段就只显示已定稿部分——
+                # 那样最近说的那一整段会从预览里消失（实测字数会从 72 掉回 64，用户看到的就是
+                # 「没把我说的话全部显示出来」）。
+                rest = self.samples[self.finalized_n:]
+                part = self.decoder.decode(tail_window(rest, self.PREVIEW_WINDOW_S)) if len(rest) else ""
+                text = _join_parts([self.finalized_text, part])
                 if text and not looks_degenerate(text):  # 重复死循环的预览别刷屏
                     self.preview_text = text
                     if self.on_preview:
                         self.on_preview(text)
                     else:
                         print(f"\r\033[K  预览: {text}", end="", flush=True)
+                # 满段定稿放在**显示之后**：它是为松手后的最终解码省时间（22 秒音频要 1.8 秒），
+                # 跟这一轮显示什么无关，放前面只会把显示往后拖。
+                self._finalize_closed()
             except Exception as e:  # 预览失败不影响主流程
                 print(f"\r\033[K  [预览失败] {e}", flush=True)
             finally:
+                # 整轮（含定稿）的耗时，用来定下一轮的间隔——见 preview_interval()
+                self.last_preview_ms = (time.monotonic() - t0) * 1000
+                if self.last_preview_ms > 4000:   # 慢得离谱就记一笔，方便对照系统负载排查
+                    print(f"\r\033[K  [预览这一轮花了 {self.last_preview_ms:.0f}ms]", flush=True)
                 self._preview_busy.clear()
 
         self._preview_busy.set()
@@ -224,7 +243,7 @@ class Recorder:
                 print("\n（到 60 秒上限，自动停止）")
                 break
             dur = len(self.chunks) * BLOCK / SAMPLE_RATE
-            if dur > 0.5 and time.monotonic() - last_preview > PREVIEW_INTERVAL:
+            if dur > 0.5 and time.monotonic() - last_preview > self.preview_interval():
                 last_preview = time.monotonic()
                 self.kick_preview()
             time.sleep(0.02)
