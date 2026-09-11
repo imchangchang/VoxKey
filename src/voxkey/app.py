@@ -103,7 +103,8 @@ def pill_wanted(st: dict, fault_age: float, auto: bool = True) -> bool:
     """悬浮条该不该出现（用户要求：空闲时不占屏幕，只在「有事要说」的时候弹出来）。
 
     出现的情况：听写中 / 上屏中、设备掉线或还在探测、暂停了、权限缺失、
-    模型加载失败这类持续错误、以及刚上屏失败的那几秒。
+    模型加载失败这类持续错误、刚上屏失败的那几秒、以及**充电中**（用户要求：充电时一直挂着，
+    这样随时能看见电量和充电状态）。
     抽成纯函数是为了能直接断言这个真值表（见 tools/smoke.py），不用起整个 App。
     """
     if not auto:
@@ -114,6 +115,7 @@ def pill_wanted(st: dict, fault_age: float, auto: bool = True) -> bool:
         or st["paused"]                                     # 用户主动停了监听，得让人看见
         or st["connected"] in (False, None)                 # 设备掉线 / 还在探测
         or not st["post_ok"] or not st["mic_ok"]            # 权限缺失（None = 还在查）
+        or st["battery_charging"]                           # 充电中：一直显示电量
         or (st["injected"].startswith("未上屏") and fault_age < FAULT_HOLD_S))
 
 
@@ -326,7 +328,7 @@ class TrayApp(Foundation.NSObject):
             "phase": PHASE_IDLE, "connected": None, "reason": "", "paused": False,
             "last_text": "", "preview": "", "device_info": "设备信息读取中…",
             "mic_ok": None, "post_ok": None, "injected": "", "device_off": False,
-            "fw_version": "", "battery_pct": None,     # 悬浮条左上/右上角的角标
+            "fw_version": "", "battery_pct": None, "battery_charging": False,   # 悬浮条角标
         }
         self.gesture_start = None
         self.utt_no = 0
@@ -511,7 +513,7 @@ class TrayApp(Foundation.NSObject):
             self._standby_logged = connected is False   # 只真掉线才重记（连接中的 None 别重复刷）
             # 设备不在线时版本/电量读不到，角标要跟着空掉，别留着上一次的旧数字
             self.set_state(connected=connected, reason=reason, device_off=power_off,
-                           fw_version="", battery_pct=None)
+                           fw_version="", battery_pct=None, battery_charging=False)
             return
         if connected is True:
             green = AppKit.NSColor.systemGreenColor()
@@ -554,7 +556,8 @@ class TrayApp(Foundation.NSObject):
             info += "（充电中）"
         if info != self.get_state()["device_info"]:      # 变了才记，别每 3 秒刷一遍
             log("设备", info)
-        self.set_state(fw_version=ver, battery_pct=pct, device_info=info)
+        self.set_state(fw_version=ver, battery_pct=pct, battery_charging=charging,
+                       device_info=info)
         return ""
 
     @objc.python_method
@@ -836,9 +839,14 @@ class TrayApp(Foundation.NSObject):
             self._linger_until = 0.0
             self._linger_text = ""
         if show_pill:
-            # 角标：左上角固件版本、右上角电量（都来自厂商通道，设备不在线时是空的）
+            # 角标：左上角固件版本、右上角电量（都来自厂商通道，设备不在线时是空的）。
+            # 充电时写成「充电 30%」——协议里 getBattery 的第 7 个字节就是充电标志，
+            # 这个信息原来只在菜单里显示。
             ver, pct = st["fw_version"], st["battery_pct"]
-            self.pill.set_meta(f"v{ver}" if ver else "", f"{pct}%" if pct is not None else "")
+            bat_text = ""
+            if pct is not None:
+                bat_text = f"充电 {pct}%" if st["battery_charging"] else f"{pct}%"
+            self.pill.set_meta(f"v{ver}" if ver else "", bat_text)
             # 引导元素（波形/呼吸）由 pill 自己画，文字里不再塞 ○●◐ 和转圈字符
             W, RED = AppKit.NSColor.whiteColor(), AppKit.NSColor.systemRedColor()
             BLUE, YELLOW = AppKit.NSColor.systemBlueColor(), AppKit.NSColor.systemYellowColor()

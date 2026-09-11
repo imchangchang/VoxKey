@@ -172,7 +172,7 @@ def pill_wanted_table() -> str:
 
     base = {"phase": "idle", "connected": True, "paused": False, "post_ok": True,
             "mic_ok": True, "injected": "", "reason": "", "preview": "", "last_text": "",
-            "device_off": False}
+            "device_off": False, "battery_charging": False}
     # (说明, 状态补丁, 距上次结果多久, 期望可见, auto)
     cases = [
         ("空闲且一切正常 → 收起", {}, 99.0, False, True),
@@ -181,6 +181,7 @@ def pill_wanted_table() -> str:
         ("设备掉线 → 出现（指示没插入）", {"connected": False}, 99.0, True, True),
         ("设备还在探测 → 出现", {"connected": None}, 99.0, True, True),
         ("接收器插着但设备关机 → 出现", {"connected": False, "device_off": True}, 99.0, True, True),
+        ("充电中 → 一直显示（用户要求）", {"battery_charging": True}, 99.0, True, True),
         ("暂停监听 → 出现", {"paused": True}, 99.0, True, True),
         ("缺辅助功能权限 → 出现", {"post_ok": False}, 99.0, True, True),
         ("麦克风没权限 → 出现", {"mic_ok": False}, 99.0, True, True),
@@ -277,9 +278,10 @@ def pill_meta() -> str:
     p.place_bottom(None)
     p.show()
 
-    # 窄状态（上屏中那种小条）最容易挤：角标必须有地方放，且不能压到状态文字
+    # 窄状态（上屏中那种小条）最容易挤：角标必须有地方放，且不能压到状态文字。
+    # 电量用最长的现实文本「充电 100%」，宽度上限就在这里。
     for text, detail in (("上屏中", None), ("听写中", "今天下午三点开会记得带电脑和充电器")):
-        p.set_meta("v4.4.0", "30%")
+        p.set_meta("v4.4.0", "充电 100%")
         p.set_status(text, AppKit.NSColor.systemBlueColor(), P.Pill.LEAD_NONE, detail)
         t = p._targets()
         cw = t["cap"].size.width
