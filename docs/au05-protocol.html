@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ulanzi AU05（VibeKey）设备协议</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2b3038; --fg: #e6e8ec; --dim: #9aa3b2;
+    --accent: #6aa9ff; --warn: #ffb454; --ok: #57d38c; --bad: #ff6b6b; --code: #101216;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.75 -apple-system, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 40px 24px 96px; }
+  h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: .5px; }
+  h2 {
+    font-size: 20px; margin: 44px 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  h3 { font-size: 16px; margin: 26px 0 10px; color: #cfd6e2; }
+  p, li { color: #d3d8e0; }
+  code {
+    background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #e9d7a8;
+  }
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto;
+    font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre code { background: none; padding: 0; color: #d7dde6; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #20242c; color: #cfd6e2; font-weight: 600; }
+  tr:nth-child(even) td { background: #191c22; }
+  .sub { color: var(--dim); font-size: 14px; margin: 0 0 4px; }
+  .meta { color: var(--dim); font-size: 13px; }
+  .badge {
+    display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11.5px;
+    line-height: 18px; vertical-align: 1px; white-space: nowrap;
+  }
+  .b-real { background: rgba(87,211,140,.15); color: var(--ok); border: 1px solid rgba(87,211,140,.35); }
+  .b-old  { background: rgba(106,169,255,.13); color: var(--accent); border: 1px solid rgba(106,169,255,.35); }
+  .b-port { background: rgba(154,163,178,.13); color: var(--dim); border: 1px solid rgba(154,163,178,.3); }
+  .b-guess{ background: rgba(255,180,84,.13); color: var(--warn); border: 1px solid rgba(255,180,84,.35); }
+  .callout {
+    border-left: 3px solid var(--warn); background: rgba(255,180,84,.07);
+    padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0;
+  }
+  .callout.bad { border-color: var(--bad); background: rgba(255,107,107,.07); }
+  .callout.ok  { border-color: var(--ok);  background: rgba(87,211,140,.07); }
+  .toc { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; }
+  .toc ol { margin: 6px 0 0; padding-left: 22px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .yes { color: var(--ok); } .no { color: var(--dim); }
+  hr { border: none; border-top: 1px solid var(--line); margin: 36px 0; }
+  .kv td:first-child { width: 210px; color: #cfd6e2; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Ulanzi AU05（VibeKey）设备协议</h1>
+<p class="sub">键盘 + 旋钮 + 麦克风一体的语音键盘，USB 无线接收器连接。本文是上位机侧能观测到的全部协议与实测行为。</p>
+<p class="meta">
+  生成时间 2026-09-11 · 依据：本仓库 <code>src/voxkey/device/</code> 的代码 + 本机真机实测 · 协议原始出处是
+  <a href="https://github.com/palaemonboy/OpenVibeKey" style="color:var(--accent)">OpenVibeKey</a>（MIT，Swift 实现），
+  我们移植了其中的 <code>VibeKitCore</code> 帧格式、TEA 与键表。
+</p>
+
+<div class="callout">
+  <b>证据等级</b>（全文逐条标注）：
+  <span class="badge b-real">实测</span> 本次或近期在本机真机上测量过 ·
+  <span class="badge b-old">实测·迁移前</span> 迁移前那台机器上的实测记录（代码注释/文档里带着的） ·
+  <span class="badge b-port">移植</span> 来自 OpenVibeKey 或厂商约定，我们没有独立验证 ·
+  <span class="badge b-guess">推断</span> 由现象推出来的解释，未被单独证实
+</div>
+
+<div class="toc">
+  <b>目录</b>
+  <ol>
+    <li><a href="#id">设备标识与 USB 拓扑</a></li>
+    <li><a href="#vendor">厂商通道（0xFFFC）：帧格式与 TEA</a></li>
+    <li><a href="#cmd">命令表</a></li>
+    <li><a href="#keys">按键槽、键位映射与两套存储</a></li>
+    <li><a href="#kbd">键盘集合：按键报文格式</a></li>
+    <li><a href="#audio">音频（UAC）</a></li>
+    <li><a href="#standby">电源与待机</a></li>
+    <li><a href="#pitfalls">实测的坑（占坑位最多的一节）</a></li>
+    <li><a href="#code">代码索引与命令行工具</a></li>
+  </ol>
+</div>
+
+<h2 id="id">1. 设备标识与 USB 拓扑</h2>
+
+<table class="kv">
+  <tr><td>VID / PID</td><td class="mono">0xFFF1 / 0x00DD</td></tr>
+  <tr><td>厂商通道 usage page</td><td class="mono">0xFFFC</td></tr>
+  <tr><td>厂商通道 report id</td><td class="mono">0x55</td></tr>
+  <tr><td>厂商通道报文长度</td><td>输入 / 输出各 <b>63 字节</b></td></tr>
+  <tr><td>键盘集合 report id</td><td class="mono">0x03</td></tr>
+  <tr><td>本机固件版本</td><td class="mono">4.4.0 <span class="badge b-real">实测</span></td></tr>
+</table>
+
+<p>设备在 USB 上是个 <b>HID 复合设备</b>，上位机能碰到的集合有三类：</p>
+
+<table>
+  <thead><tr><th>接口</th><th>集合</th><th>用途</th><th>我们怎么用</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>接口 2</td>
+      <td>标准 HID<br><span class="mono">report id 3</span> 键盘 / <span class="mono">2</span> 鼠标 / <span class="mono">1</span> consumer</td>
+      <td>设备当普通键盘用：按键报文走这里</td>
+      <td>直接读键盘集合拿到「语音键/确认/取消」的原始报文</td>
+    </tr>
+    <tr>
+      <td>接口 3</td>
+      <td>厂商集合<br><span class="mono">usage page 0xFFFC</span>，<span class="mono">report id 0x55</span></td>
+      <td>官方 Ulanzi Studio 走这条：读固件/电量/SN、改键位映射、待机设置</td>
+      <td>只读信息 + 心跳；改映射的接口也通了但我们不改用户配置</td>
+    </tr>
+    <tr>
+      <td>—</td>
+      <td>标准 UAC 音频</td>
+      <td>麦克风（在键盘本体上，音频经接收器转发）</td>
+      <td>当普通输入设备录音，CoreAudio 里叫 <code>AU05</code></td>
+    </tr>
+  </tbody>
+</table>
+<p class="meta">拓扑来自本机 <code>ioreg</code> / <code>hid.enumerate()</code> 实测。<span class="badge b-old">实测·迁移前</span> 接口编号与 report id 的对应当时核过。</p>
+
+<h2 id="vendor">2. 厂商通道（0xFFFC）：帧格式与 TEA</h2>
+
+<h3>2.1 组帧</h3>
+<pre><code>明文（64 字节）
+┌──────┬──────┬──────┬──────┬─────────────────────────┬──────────┐
+│  b0  │  b1  │  b2  │  b3  │      payload（≤ 60B）     │  补 0 到 64│
+└──────┴──────┴──────┴──────┴─────────────────────────┴──────────┘
+        │
+        ▼  TEA-ECB，32 轮，8 字节一块，字是小端
+密文（64 字节）→ 只发前 63 字节 → HID 层再前置 report id 0x55</code></pre>
+
+<table class="kv">
+  <tr><td>TEA 密钥（固定）</td><td class="mono">CAA5BACA BC2A8A6D CA5A9EBA 9BB88BCA</td></tr>
+  <tr><td>delta</td><td class="mono">0x9E3779B9</td></tr>
+  <tr><td>轮数</td><td>32 <span class="badge b-port">移植</span></td></tr>
+  <tr><td>模式</td><td>ECB，逐 8 字节块；末块不足 8 字节就原样保留</td></tr>
+</table>
+
+<div class="callout bad">
+  <b>密钥是全局固定、不分设备的</b>——等于没有任何鉴权。任何程序插上就能读写设备配置。这是移植自 OpenVibeKey 的事实，不是我们的选择。
+</div>
+
+<h3>2.2 方向与响应匹配</h3>
+<table>
+  <thead><tr><th>字段</th><th>读（GET）</th><th>写（SET）</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><span class="mono">b0</span></td><td colspan="2"><span class="mono">0x01</span>（<span class="mono">heartbeat</span> 用 <span class="mono">0x06</span>）</td><td>命令大类</td></tr>
+    <tr><td><span class="mono">b1</span></td><td colspan="2">命令 ID</td><td>响应里会回显</td></tr>
+    <tr><td><span class="mono">b2</span></td><td colspan="2">子命令 ID</td><td>响应里会回显</td></tr>
+    <tr><td><span class="mono">b3</span></td><td><span class="mono">0x01</span></td><td><span class="mono">0x04</span></td><td>方向位（个别命令例外，见命令表）</td></tr>
+  </tbody>
+</table>
+<ul>
+  <li>设备响应：解出来的明文里 <b><span class="mono">b0</span> 最高位为 1</b>，且 <span class="mono">b1/b2</span> 回显请求值——上位机就靠这两个字节配对响应。</li>
+  <li>响应数据 = 明文去掉前 4 字节头，即 <span class="mono">plain[4:]</span>。</li>
+  <li>超时窗口默认 <b>0.8 秒</b>（<code>VibeKey.request()</code>）；分片类命令（SN/UUID）用 <span class="mono">collect()</span> 收 0.6 秒窗口内的多帧再拼。</li>
+</ul>
+
+<h2 id="cmd">3. 命令表</h2>
+<p class="sub">下表就是上位机知道的所有命令。b0/b1/b2 为读方向的值，写方向把 b3 换成 <span class="mono">0x04</span>。</p>
+
+<table>
+  <thead><tr><th>名称</th><th class="mono">b0 b1 b2</th><th>用途 / 响应布局</th><th>我们在用吗</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="mono">getVersion</td><td class="mono">01 04 04</td>
+      <td>固件版本。data[6..8] = 主.次.修订</td>
+      <td class="yes">用：左上角角标 + 在线探测</td>
+    </tr>
+    <tr>
+      <td class="mono">getBattery</td><td class="mono">01 01 02</td>
+      <td>电量。电压 u16le @0（mV）/ 百分比 @2 / 充电标志 @6</td>
+      <td class="yes">用：右上角角标（本机读数 20~40%、3550~3610mV）</td>
+    </tr>
+    <tr>
+      <td class="mono">getSN</td><td class="mono">01 01 0b</td>
+      <td>设备 SN，<b>分片</b>返回，需拼接。每片 data = [len, seg, ascii…]</td>
+      <td class="yes">用：菜单里的设备信息</td>
+    </tr>
+    <tr>
+      <td class="mono">getUUID</td><td class="mono">01 01 0c</td>
+      <td>设备 UUID，同样分片</td>
+      <td class="no">未用</td>
+    </tr>
+    <tr>
+      <td class="mono">getMicEnable</td><td class="mono">01 01 2a</td>
+      <td>麦克风开关</td>
+      <td class="no">未用</td>
+    </tr>
+    <tr>
+      <td class="mono">getShortcut</td><td class="mono">01 06 50</td>
+      <td>读某槽快捷键，payload = <span class="mono">[slot]</span></td>
+      <td class="yes">用：探针 info 打印键位表</td>
+    </tr>
+    <tr>
+      <td class="mono">getButtonFunc</td><td class="mono">01 06 10</td>
+      <td>读某槽「原厂固定功能」（媒体键语义），payload = <span class="mono">[0x00, slot]</span></td>
+      <td class="yes">用：探针打印；改键时先清它</td>
+    </tr>
+    <tr>
+      <td class="mono">getHooksMode</td><td class="mono">01 0b 89</td>
+      <td>按键钩子模式</td>
+      <td class="no">读得到，<b>本机固件写不进去</b> <span class="badge b-old">实测·迁移前</span></td>
+    </tr>
+    <tr>
+      <td class="mono">getAudioBtnMode</td><td class="mono">01 06 51</td>
+      <td>语音键的系统模式</td>
+      <td class="no">同上，写不进去</td>
+    </tr>
+    <tr>
+      <td class="mono">getStandbyTime</td><td class="mono">01 01 2c</td>
+      <td>待机秒数 u32le；<b>超时后厂商通道不再响应</b></td>
+      <td class="yes">用：本机读到 <b>300 秒</b> <span class="badge b-real">实测</span></td>
+    </tr>
+    <tr>
+      <td class="mono">getIndicatorRaw</td><td class="mono">01 0b 88</td>
+      <td>指示灯参数原始字节</td>
+      <td class="no">未用</td>
+    </tr>
+    <tr>
+      <td class="mono">heartbeat</td><td class="mono">06 01 23</td>
+      <td>b3 = <b>0x00</b>（不是 0x01）。注释写的是「试着唤醒假死的厂商口」</td>
+      <td class="no">发了，但<b>叫不醒待机的设备</b> <span class="badge b-real">实测</span>（见 §7）</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="keys">4. 按键槽、键位映射与两套存储</h2>
+
+<p>设备有 4 个可配置按键槽，<b>每个槽有两套互相独立的存储</b>：</p>
+
+<table>
+  <thead><tr><th>槽</th><th>物理键</th><th><span class="mono">0x50</span> 快捷键</th><th><span class="mono">0x10</span> 原厂固定功能</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>btn1（语音键 / 麦克风图标）</td><td>可写（见 §8.5 的坑）</td><td><span class="mono">0x6f</span> = 语音 <span class="badge b-old">实测·迁移前</span></td></tr>
+    <tr><td>1</td><td>btn2（确认键）</td><td>可写</td><td>确认</td></tr>
+    <tr><td>2</td><td>btn3（取消键）</td><td>可写</td><td>取消</td></tr>
+    <tr><td>3</td><td>旋钮按下</td><td>可写</td><td>—</td></tr>
+  </tbody>
+</table>
+
+<h3>4.1 写快捷键（0x50）</h3>
+<pre><code>payload = [ slot, 0x01, num, (pageSign, value) × num ]
+清空     = [ slot, 0x01, 0x00 ]</code></pre>
+<ul>
+  <li>一条快捷键<b>最多 4 个条目</b>（至多 3 个修饰键 + 1 个主键），官方 App 同款约束。</li>
+  <li><span class="mono">pageSign</span>：bit7 = 左右修饰（1 = 左），低 7 位 = page。写的时候 <span class="mono">(page &amp; 0x7F) | (0x80 if 左)</span>。</li>
+  <li>读回来的格式：<span class="mono">[slot, ?, num, (pageSign, value) × num]</span>。键表之外的条目（比如原厂给 btn1 塞的 fn/🌐）不猜，原样显示成 <span class="mono">?page:value</span>。</li>
+  <li>写 <span class="mono">0x10 = 0</span> 会清掉该槽的原厂语义；<b>推荐顺序是先清 0x10、再写 0x50，中间留 120ms</b>——不留固件会丢帧。<span class="badge b-port">移植</span></li>
+</ul>
+
+<h3>4.2 键位表</h3>
+<table>
+  <thead><tr><th>token</th><th>page</th><th>value</th><th>备注</th></tr></thead>
+  <tbody>
+    <tr><td>LCtrl / LShift / LOpt / LCmd</td><td>3</td><td class="mono">0x01 / 0x02 / 0x04 / 0x08</td><td>sign = 1（左）</td></tr>
+    <tr><td>RCtrl / RShift / ROpt / RCmd</td><td>3</td><td class="mono">0x10 / 0x20 / 0x40 / 0x80</td><td>sign = 0（右）</td></tr>
+    <tr><td>A … Z</td><td>2</td><td class="mono">0x04 … 0x1D</td><td></td></tr>
+    <tr><td>1 … 0</td><td>2</td><td class="mono">0x1E … 0x27</td><td></td></tr>
+    <tr><td>Enter / Esc / Tab / Space</td><td>2</td><td class="mono">0x28 / 0x29 / 0x2B / 0x2C</td><td></td></tr>
+    <tr><td>F1 … F12</td><td>2</td><td class="mono">0x3A … 0x45</td><td>设备键表到 F12 为止，<b>没有 F13+</b></td></tr>
+    <tr><td>Left / Down / Up / Right</td><td>2</td><td class="mono">0x4F / 0x51 / 0x52 / 0x50</td><td>注意 Down 比 Up 小</td></tr>
+  </tbody>
+</table>
+<p class="meta">上表是 <code>protocol.KEYMAP</code>，移植自 OpenVibeKey 的 <code>Keymap.swift</code>。<span class="badge b-port">移植</span> 往返读写（写进去再读回来）在本机是一致的。<span class="badge b-old">实测·迁移前</span></p>
+
+<h2 id="kbd">5. 键盘集合：按键报文格式</h2>
+
+<pre><code>hidapi 返回 9 字节：
+┌───────────┬────────┬──────┬────────┬──────────────────────┐
+│ report id │  修饰位 │ 保留 │ key0   │ key1 … key5          │
+│   0x03    │  mods  │      │        │ 按下的 keycode 列表   │
+└───────────┴────────┴──────┴────────┴──────────────────────┘</code></pre>
+
+<table class="kv">
+  <tr><td>修饰位</td><td><span class="mono">0x01</span> LCtrl · <span class="mono">0x02</span> LShift · <span class="mono">0x04</span> LOpt · <span class="mono">0x08</span> LCmd<br><span class="meta">设备只发左侧修饰（按语音键时会带 <span class="mono">0x08</span>）</span></td></tr>
+  <tr><td>keycode 列表</td><td>取 <span class="mono">raw[3:9]</span> 里非 0 的字节，去重后按「状态变化才回调」</td></tr>
+</table>
+
+<h3>5.1 本机实测到的键码</h3>
+<table>
+  <thead><tr><th>键码</th><th>物理键</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">0x0b</td><td>语音键</td><td><b>原生键码</b>，短按/长按都发，且带 <span class="mono">mods=0x08</span>。系统对它没反应（不隐藏窗口、不打字）——等于设备给上位机的私有事件 <span class="badge b-old">实测·迁移前</span></td></tr>
+    <tr><td class="mono">0x28</td><td>确认键</td><td>= Enter</td></tr>
+    <tr><td class="mono">0x29</td><td>取消键（原厂）</td><td>= Esc。系统侧会打断对话，所以我们把它重映射掉</td></tr>
+    <tr><td class="mono">0x2a</td><td>取消键（重映射后）</td><td>= Backspace <span class="badge b-old">实测·迁移前</span></td></tr>
+    <tr><td class="mono">0x42 / 0x44</td><td>F9 / F11</td><td>F9 组合用作哨兵键；F11 与 Esc 同义（取消）</td></tr>
+    <tr><td class="mono">0xde</td><td>?</td><td><b>不在键表里的怪码</b>，插拔接收器后出现过一次。上位机一律只记日志、不做动作 <span class="badge b-real">实测</span></td></tr>
+  </tbody>
+</table>
+
+<h2 id="audio">6. 音频（UAC）</h2>
+<ul>
+  <li>麦克风在键盘本体上，音频经接收器转发；对主机就是个标准 UAC 输入设备，CoreAudio 里名字是 <code>AU05</code>。</li>
+  <li>设备暴露 2 个输入通道、48kHz；我们按模型需要的 <b>16kHz 单声道</b>采集（CoreAudio 负责重采样）。</li>
+  <li>接收器插拔之后 <b>CoreAudio 的设备编号会变</b>，缓存的编号就失效了——所以每次录音前都要重新解析。</li>
+  <li><b>PortAudio 的设备表是缓存的</b>，插拔不会自动刷新。不改这一点，插拔后会拿着一个已经不存在的设备去打开，报 <span class="mono">-10851 (Invalid Property Value)</span> 再 <span class="mono">-9986</span>。<span class="badge b-real">实测</span> 见 §8.2。</li>
+</ul>
+
+<h2 id="standby">7. 电源与待机</h2>
+
+<table class="kv">
+  <tr><td>待机阈值</td><td><b>300 秒</b>（命令 <span class="mono">getStandbyTime</span> 读回）<span class="badge b-real">实测</span></td></tr>
+  <tr><td>触发条件</td><td>闲置（没有按键、也没人问厂商通道）达到阈值</td></tr>
+  <tr><td>进待机后的现象</td><td>厂商通道<b>完全不应答</b></td></tr>
+  <tr><td>怎么唤醒</td><td><b>按一下键</b>。但那一按会被设备自己吞掉，<b>要按第二次</b>才有报文 <span class="badge b-real">实测</span></td></tr>
+  <tr><td>心跳能唤醒吗</td><td><b>不能</b>。发了 <span class="mono">heartbeat</span> 再问，仍然不应答 <span class="badge b-real">实测</span></td></tr>
+</table>
+
+<div class="callout bad">
+  <b>待机和真关机，上位机能观测到的信号完全一样</b>——这是本节最重要的结论。
+  <table style="margin-top:10px">
+    <thead><tr><th></th><th>待机</th><th>真关机</th><th>接收器拔掉</th></tr></thead>
+    <tbody>
+      <tr><td>HID 枚举能看到接口</td><td>是</td><td>是</td><td><b>否</b></td></tr>
+      <tr><td>键盘集合能打开</td><td>是</td><td>是</td><td>否</td></tr>
+      <tr><td>CoreAudio 里有 AU05</td><td>是</td><td>是</td><td><b>否</b></td></tr>
+      <tr><td>厂商通道应答</td><td><b>否</b></td><td><b>否</b></td><td>接口不存在</td></tr>
+      <tr><td>发 heartbeat 能唤醒</td><td><b>否</b></td><td>否</td><td>—</td></tr>
+    </tbody>
+  </table>
+  所以上位机只能说「设备待机/关机中」，不能二选一。只有「接收器拔掉」是能确定性判定的（HID 枚举直接没了）。
+</div>
+
+<p class="meta">
+  静置实验原始记录：16:27:34 <span class="mono">version=4.4.0 电池=(30,3509,False)</span> 用时 54ms → 中间 420 秒一个厂商帧都没发、也没人碰设备 →
+  16:34:35 <span class="mono">version=None</span>（等满 814ms 超时）。
+</p>
+
+<h2 id="pitfalls">8. 实测的坑</h2>
+<p class="sub">这一节是整份文档里最值钱的部分——协议本身很干净，麻烦全在系统侧和设备状态机上。</p>
+
+<h3>8.1 键盘集合是独占的：我们一打开，macOS 就收不到这台设备的按键</h3>
+<p>
+  对照实验（同进程双通道、带时间戳）证实：我们的进程一读这个键盘集合，系统就收不到该设备的按键报文——
+  <b>谁先打开谁独占</b>。后果是设备上那两颗普通键（确认 = 回车、取消 = 退格）在前台应用里完全没反应。
+  所以报文既然只到我们手里，就由我们转发给系统（合成一次键盘事件）。
+  <span class="badge b-old">实测·迁移前</span> · 双向验证过（不转发时系统确实收不到；转发后按一次只触发一次，不会双字符）
+</p>
+
+<h3>8.2 接收器插拔：HID 立刻能感知，音频那边完全不知情</h3>
+<p>
+  HID 那条路每次都重新枚举，所以拔掉立刻能发现；但音频走 PortAudio，而
+  <b>PortAudio 在初始化之后会把设备表缓存住</b>，插拔不刷新。于是 <code>query_devices()</code> 照样把 AU05 报在旧编号上，
+  上位机拿着一个底层已经不存在的设备去打开 → <span class="mono">-10851</span> → <span class="mono">-9986</span>。
+  必须 <code>sd._terminate(); sd._initialize()</code> 重新枚举才能恢复。
+  <span class="badge b-real">实测</span>
+</p>
+
+<h3>8.3 插回之后有约 3.6 秒「句柄拿到了但设备不发报文」</h3>
+<p>
+  键盘集合能打开<b>只是个句柄</b>，不等于设备已经在发按键报文。实测插回接收器后：
+  集合打开 → 接下来约 3.6 秒一个报文都没有 → 之后才正常。用户正好在这段时间按键，就是「按了没反应」。
+  对策是打开之后先做一次「设备真的能用了吗」的探针，通过才对外报「已连接」。
+  <span class="badge b-real">实测</span>
+</p>
+
+<h3>8.4 待机时第一次按键被吞</h3>
+<p>见 §7。这条是产品级的：闲置 5 分钟后回来按的第一下不会有任何反应，第二下才生效。</p>
+
+<h3>8.5 改键位映射的三个坑</h3>
+<ul>
+  <li><b>0x50 写进去要插拔接收器重新枚举才生效</b>。<span class="badge b-old">实测·迁移前</span></li>
+  <li><b>不要把 0x10 清成 0 就以为完事</b>——清错会导致整颗键哑掉。<span class="badge b-old">实测·迁移前</span></li>
+  <li><b>语音键（槽 0）的 0x50 即使插拔也仍然发原生 0x0b</b>，优先级被 0x10 的 <span class="mono">0x6f</span> 压住。所以触发语音键只能靠读键盘集合，改映射这条路走不通。<span class="badge b-old">实测·迁移前</span></li>
+</ul>
+
+<h3>8.6 官方 Ulanzi Studio 会抢会话</h3>
+<p>
+  实测 Studio 开着时我们仍能打开厂商通道并读写，但两边同时写配置会互相覆盖。
+  排障时先确认 Studio 没在跑。<span class="badge b-old">实测·迁移前</span>
+</p>
+
+<h3>8.7 两个进程同时问厂商通道会互相吃掉响应帧</h3>
+<p>
+  厂商通道的响应是靠 <span class="mono">b0/b1/b2</span> 匹配的，没有会话 ID。多个进程同时探测时，
+  谁的 <code>read()</code> 先拿到帧，另一边的响应就被吃掉了，表现为「明明在线却问不到」。
+  我们为此没让监控脚本和常驻程序同时探测。<span class="badge b-guess">推断</span>（现象与机制吻合，未做严格的对照实验）
+</p>
+
+<h3>8.8 待机阈值和我们自己的探测会打架</h3>
+<p>
+  待机是「300 秒没人理就睡」。如果上位机每 3 秒去问一次厂商通道，<b>很可能一直把它吵醒、永远不进待机</b>——
+  这对「随时按键都能用」是好事，代价是持续无线交互（一天两万多次请求）与耗电。
+  所以上位机留了开关 <code>VOXKEY_NO_DEVICE_PROBE=1</code> 来关掉周期探测。
+  <span class="badge b-guess">推断</span>（「厂商流量算不算它的活动」这一点还没对照验证过）
+</p>
+
+<h2 id="code">9. 代码索引与命令行工具</h2>
+
+<table>
+  <thead><tr><th>文件</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">src/voxkey/device/protocol.py</td><td>帧格式、TEA 加解密、命令表 <code>COMMANDS</code>、键位表 <code>KEYMAP</code>、各类响应解析</td></tr>
+    <tr><td class="mono">src/voxkey/device/device.py</td><td>厂商通道传输层 <code>VibeKey</code>：open/request/collect/listen + 版本/电量/SN/键位/待机时间</td></tr>
+    <tr><td class="mono">src/voxkey/device/keyreader.py</td><td>键盘集合读取 <code>DeviceKeyReader</code>、报文解析、键码常量</td></tr>
+    <tr><td class="mono">src/voxkey/device/monitor.py</td><td>实时监视：按键 + 转写，边按边看</td></tr>
+    <tr><td class="mono">tools/device_probe.py</td><td>设备诊断 CLI：读信息、监听上报帧、改键位</td></tr>
+  </tbody>
+</table>
+
+<h3>常用命令</h3>
+<pre><code># 读设备信息（固件 / 电量 / SN / 模式 / 四个键槽）
+PYTHONPATH=src .venv/bin/python tools/device_probe.py info
+
+# 被动监听设备主动上报的帧（排查用）
+PYTHONPATH=src .venv/bin/python tools/device_probe.py listen --secs 15
+
+# 给某个键槽写「哨兵键」（先清掉原厂固定功能再写快捷键）
+PYTHONPATH=src .venv/bin/python tools/device_probe.py set-key --slot 0 --combo ctrl+alt+cmd+F9
+PYTHONPATH=src .venv/bin/python tools/device_probe.py clear-key --slot 0
+
+# 发任意命令看原始响应
+PYTHONPATH=src .venv/bin/python tools/device_probe.py raw 0x0b 0x89</code></pre>
+
+<hr>
+<p class="meta">
+  这份文档只描述上位机侧能观测到的协议与行为，不含固件实现。
+  协议原始出处：<a href="https://github.com/palaemonboy/OpenVibeKey" style="color:var(--accent)">OpenVibeKey</a>（MIT）的
+  <code>VibeKitCore</code>（Frame.swift / Crypto.swift / Keymap.swift）。
+  标 <span class="badge b-real">实测</span> 的条目可以在本仓库的提交记录和运行日志里找到对应证据。
+</p>
+
+</div>
+</body>
+</html>

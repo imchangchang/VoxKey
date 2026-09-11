@@ -79,6 +79,9 @@ tools/
   verify/           模型质量对比：候选模型 × 语料，输出 CER / 首字延迟 / RTF
 ```
 
+设备协议（AU05 的 HID 集合、厂商通道帧格式与 TEA、命令表、键位表、待机行为、以及实测踩过的坑）
+整理成了 `docs/au05-protocol.html`，浏览器直接打开看。
+
 ## 任务与 issue
 
 任务唯一事实源是**本仓库的 Issues**（状态用 label：`b:open` / `b:doing` / `b:done` / `b:closed`）。这些条目是从硬件仓库 c3ng-dev/OneSay 迁过来的，编号有变化：
