@@ -73,6 +73,13 @@ LEVEL_FLOOR = 0.12               # 波形留一点底，不然静音时整条看
 
 _STATUS_FONT = NSFont.systemFontOfSize_(12.5)
 
+# 角标（左上角固件版本、右上角电量）：小一号、半透明，别抢中间状态行的注意力。
+# 两边都留出同样的宽度，中间的状态组才还是正的居中。
+META_SIZE = 10.0
+META_GAP = 9.0
+_META_FONT = NSFont.systemFontOfSize_(META_SIZE)
+_META_COLOR = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.5)
+
 
 def _fade(layer, to: float, duration: float = 0.18) -> None:
     """透明度淡入淡出：符号出现/消失不做瞬时跳变（用户反馈「符号像从别处刷出来」）。"""
@@ -241,7 +248,12 @@ class Pill(NSObject):
         # 它们的屏幕位置只跟胶囊最终中心（恒定）挂钩，与动画完全解耦（用户要求「符号和
         # 听写中绑在一起，不随其他动画动」）。
         self.t_status, self.t_detail = self._new_text(), self._new_text()
+        self.t_meta_l = self._new_text(META_SIZE, _META_COLOR)   # 左上角：固件版本
+        self.t_meta_r = self._new_text(META_SIZE, _META_COLOR)   # 右上角：电量
         self.bars = [self._new_bar(NSColor.whiteColor()) for _ in range(BAR_N)]
+
+        self._meta_l = ""
+        self._meta_r = ""
 
         self._status = ""
         self._detail = ""
@@ -257,15 +269,15 @@ class Pill(NSObject):
         return self
 
     @objc.python_method
-    def _new_text(self):
+    def _new_text(self, size: float = 12.5, color=None):
         tl = Quartz.CATextLayer.layer()
-        tl.setFont_(_STATUS_FONT)
-        tl.setFontSize_(12.5)
+        tl.setFont_(NSFont.systemFontOfSize_(size))
+        tl.setFontSize_(size)
         tl.setAlignmentMode_("center")
         tl.setWrapped_(True)   # 注意：CATextLayer 的属性名是 isWrapped，setter 是 setWrapped_
         tl.setTruncationMode_("none")
         tl.setContentsScale_(NSScreen.mainScreen().backingScaleFactor())
-        tl.setForegroundColor_(NSColor.whiteColor().CGColor())
+        tl.setForegroundColor_((color or NSColor.whiteColor()).CGColor())
         self.clip.addSublayer_(tl)
         return tl
 
@@ -292,7 +304,7 @@ class Pill(NSObject):
         inner = MAX_W - 2 * PAD_X
 
         def fits(s: str) -> bool:
-            return self._measure(self.t_detail, s, inner)[1] <= MAX_LINES * LINE_H + 0.5
+            return self._measure(s, inner)[1] <= MAX_LINES * LINE_H + 0.5
 
         if fits(text):
             return text
@@ -307,14 +319,15 @@ class Pill(NSObject):
 
     # ---------- 度量 ----------
     @objc.python_method
-    def _measure(self, layer, text: str, max_inner: float):
+    def _measure(self, text: str, max_inner: float, font=None):
         """量一段文字：返回（单行自然宽，按文本框实际宽度折行后的高）。
 
         用 boundingRect 而不是 cellSizeForBounds：后者会多算约 8pt 内边距，导致内容整体偏左
-        （实测「空闲」量出 33pt、实际只有 25pt）。按 (哪行, 文本, 可用宽) 缓存——预览每 0.8 秒
+        （实测「空闲」量出 33pt、实际只有 25pt）。按 (字号, 文本, 可用宽) 缓存——预览每 0.8 秒
         才变一次，没必要反复量。
         """
-        key = (layer is self.t_detail, text, round(max_inner, 1))
+        font = font or _STATUS_FONT
+        key = (font.pointSize(), text, round(max_inner, 1))
         hit = self._meas.get(key)
         if hit is not None:
             return hit
@@ -326,7 +339,7 @@ class Pill(NSObject):
 
         # 不用 CATextLayer.attributedString（PyObjC 没暴露 getter），直接用同字体构造
         att = NSAttributedString.alloc().initWithString_attributes_(
-            text, {NSFontAttributeName: _STATUS_FONT})
+            text, {NSFontAttributeName: font})
 
         def box(width):
             r = att.boundingRectWithSize_options_(NSMakeSize(width, 10000.0), opts)
@@ -354,29 +367,53 @@ class Pill(NSObject):
         lead_w = bars_w if self._lead == self.LEAD_WAVE else 0.0
         gap = GAP if lead_w else 0.0                    # 没有符号就不留符号间距
         inner = MAX_W - 2 * PAD_X
-        status_w, status_h = self._measure(self.t_status, self._status, inner - lead_w - gap)
+        status_w, status_h = self._measure(self._status, inner - lead_w - gap)
         status_h = status_h or 15.0
         row1_w = (lead_w + gap + status_w) if self._status else 0.0
-        detail_w, detail_h = self._measure(self.t_detail, self._shown_detail, inner)
+        detail_w, detail_h = self._measure(self._shown_detail, inner)
         stacked = bool(self._shown_detail)
         row2_w, row2_h = (detail_w, detail_h + SLACK_H) if stacked else (0.0, 0.0)
 
-        cw = max(MIN_W, min(MAX_W, max(row1_w, row2_w) + 2 * PAD_X))
+        # 角标（左上版本 / 右上电量）：两边各留出「较宽的那个 + 间距」，中间状态组才是真的居中；
+        # 只留右边的话窄胶囊里角标会压到状态文字上（上屏中那种小条只有 60pt 宽）。
+        meta_l_w = self._measure(self._meta_l, 200.0, _META_FONT)[0] if self._meta_l else 0.0
+        meta_r_w = self._measure(self._meta_r, 200.0, _META_FONT)[0] if self._meta_r else 0.0
+        meta_h = self._measure("0", 100.0, _META_FONT)[1] if (meta_l_w or meta_r_w) else 0.0
+        meta_reserve = (2 * (max(meta_l_w, meta_r_w) + META_GAP)) if (meta_l_w or meta_r_w) else 0.0
+
+        cw = max(MIN_W, min(MAX_W, max(row1_w, row2_w) + 2 * PAD_X + meta_reserve))
         ch = max(MIN_H, PAD_Y * 2 + status_h + SLACK_H + ((ROW_GAP + row2_h) if stacked else 0.0))
         return {
             "cap": NSMakeRect((WIN_W - cw) / 2, WIN_BOTTOM, cw, ch),
             "status_w": status_w,
             "status_h": status_h,
             "status_h1": status_h + SLACK_H,
-            "single_h": self._measure(self.t_status, self._status, 10000.0)[1] or 15.0,
+            "single_h": self._measure(self._status, 10000.0)[1] or 15.0,
             "lead_w": lead_w,
             "row1_w": row1_w,
             "detail_w": detail_w,
             "detail_h": detail_h,
             "stacked": stacked,
+            "meta_l_w": meta_l_w,
+            "meta_r_w": meta_r_w,
+            "meta_h": meta_h,
         }
 
     # ---------- 对外 API ----------
+    @objc.python_method
+    def set_meta(self, version: str = "", battery: str = "") -> None:
+        """左上角放固件版本、右上角放电量（用户要求：浮窗一出现就能看到设备状态）。
+
+        这两样来自厂商通道，只有设备本体在线时才读得到；读不到就传空串，角标自己藏起来。
+        """
+        version, battery = version or "", battery or ""
+        if (version, battery) == (self._meta_l, self._meta_r):
+            return
+        self._meta_l, self._meta_r = version, battery
+        self.t_meta_l.setString_(version)
+        self.t_meta_r.setString_(battery)
+        self._apply()
+
     @objc.python_method
     def set_status(self, text: str, color=None, lead: str = LEAD_NONE,
                    detail: str | None = None, pulse: bool = False) -> None:
@@ -515,6 +552,13 @@ class Pill(NSObject):
         Quartz.CATransaction.begin()
         _spring(self.t_status, "position", self.t_status.setPosition_, (status_cx, status_cy))
         _spring(self.t_detail, "position", self.t_detail.setPosition_, (lcx, detail_cy))
+        # 角标跟状态行同一排，贴胶囊左右两端（本地坐标）。位置也用弹簧，胶囊变宽时跟着走。
+        if t["meta_l_w"]:
+            _spring(self.t_meta_l, "position", self.t_meta_l.setPosition_,
+                    (PAD_X + t["meta_l_w"] / 2, status_cy))
+        if t["meta_r_w"]:
+            _spring(self.t_meta_r, "position", self.t_meta_r.setPosition_,
+                    (cw - PAD_X - t["meta_r_w"] / 2, status_cy))
         wave = 1.0 if self._lead == self.LEAD_WAVE else 0.0
         for i, bar in enumerate(self.bars):
             _spring(bar, "position", bar.setPosition_,
@@ -525,6 +569,11 @@ class Pill(NSObject):
                                             t["detail_h"] + SLACK_H))
         self.t_detail.setHidden_(not t["stacked"])
         self.t_detail.setOpacity_(1.0 if t["stacked"] else 0.0)
+        # 角标没内容就藏起来（宽度给 1 而不是 0：0 宽的 CATextLayer 渲染不出来还占个位置）
+        self.t_meta_l.setBounds_(NSMakeRect(0, 0, t["meta_l_w"] + 4, t["meta_h"] + 2))
+        self.t_meta_r.setBounds_(NSMakeRect(0, 0, t["meta_r_w"] + 4, t["meta_h"] + 2))
+        self.t_meta_l.setHidden_(not t["meta_l_w"])
+        self.t_meta_r.setHidden_(not t["meta_r_w"])
         Quartz.CATransaction.commit()
 
         # 命中区域跟随胶囊（留 4pt 手感余量）

@@ -43,7 +43,7 @@ import Quartz  # noqa: E402
 
 from voxkey.audio import Recorder, find_input_device
 from voxkey.device import protocol as P
-from voxkey.device.device import VibeKey, VibeKeyNotFound
+from voxkey.device.device import VibeKey
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, MOD_CTRL,
                                      MOD_OPT, DeviceKeyReader, find_keyboard_path)
 from voxkey.inject import Injector, ax_trusted, frontmost_info, reactivate
@@ -295,6 +295,7 @@ class TrayApp(Foundation.NSObject):
             "phase": PHASE_IDLE, "connected": None, "reason": "", "paused": False,
             "last_text": "", "preview": "", "device_info": "设备信息读取中…",
             "mic_ok": None, "post_ok": None, "injected": "", "device_off": False,
+            "fw_version": "", "battery_pct": None,     # 悬浮条左上/右上角的角标
         }
         self.gesture_start = None
         self.utt_no = 0
@@ -445,18 +446,38 @@ class TrayApp(Foundation.NSObject):
         if not connected:
             self._audio_dirty = True      # 设备掉过线，音频设备表要重新枚举（见 _resolve_audio_device）
             self._woke_device = False     # 下次连上要重新唤醒一次
+            # 设备不在线时版本/电量读不到，角标要跟着空掉，别留着上一次的旧数字
+            self.set_state(connected=connected, reason=reason, device_off=power_off,
+                           fw_version="", battery_pct=None)
+            return
         self.set_state(connected=connected, reason=reason, device_off=power_off)
 
     # ---------- 设备「真的能用了吗」（插回来时报「已连接」之前先过这一关） ----------
 
     @objc.python_method
-    def _vendor_alive(self) -> bool:
-        """厂商通道能应答吗——设备本体（键盘）在线才会回我们的加密帧。"""
+    def _read_device_status(self) -> bool:
+        """读一次设备本体状态，顺带当「在不在线」的探测：厂商通道答话 = 设备在线。
+
+        一次会话里把版本和电量都读掉——电量顺便喂给悬浮条右上角的角标（用户要求：浮窗出现
+        时就能看到设备状态）。返回设备在不在线。
+        """
         try:
             with VibeKey() as vk:
-                return vk.version() is not None
+                ver = vk.version()
+                if ver is None:
+                    return False
+                bat = vk.battery()
         except Exception:
             return False
+        pct = bat[0] if bat else None
+        charging = bool(bat[2]) if bat else False
+        info = f"固件 {ver}" + (f" · 电量 {pct}%" if pct is not None else "")
+        if charging:
+            info += "（充电中）"
+        if info != self.get_state()["device_info"]:      # 变了才记，别每 4 秒刷一遍
+            log("设备", info)
+        self.set_state(fw_version=ver, battery_pct=pct, device_info=info)
+        return True
 
     @objc.python_method
     def _wake_device(self) -> None:
@@ -472,7 +493,7 @@ class TrayApp(Foundation.NSObject):
         """设备本体还在线吗（看守线程周期性问）。录音中不打扰，直接当在线。"""
         if self.current_stop is not None:
             return True
-        return self._vendor_alive()
+        return self._read_device_status()
 
     @objc.python_method
     def _audio_device_present(self) -> bool:
@@ -497,7 +518,7 @@ class TrayApp(Foundation.NSObject):
         if not self._woke_device:
             self._woke_device = True
             self._wake_device()          # 先敲一下（设备待机时厂商口不响应）
-        if not self._vendor_alive():
+        if not self._read_device_status():
             return False
         return self._audio_device_present()
 
@@ -709,6 +730,9 @@ class TrayApp(Foundation.NSObject):
         want_pill = pill_wanted(st, age, self.pill_auto)
         fault = st["injected"].startswith("未上屏") and age < FAULT_HOLD_S
         if want_pill:
+            # 角标：左上角固件版本、右上角电量（都来自厂商通道，设备不在线时是空的）
+            ver, pct = st["fw_version"], st["battery_pct"]
+            self.pill.set_meta(f"v{ver}" if ver else "", f"{pct}%" if pct is not None else "")
             # 引导元素（波形/呼吸）由 pill 自己画，文字里不再塞 ○●◐ 和转圈字符
             W, RED = AppKit.NSColor.whiteColor(), AppKit.NSColor.systemRedColor()
             BLUE, YELLOW = AppKit.NSColor.systemBlueColor(), AppKit.NSColor.systemYellowColor()
@@ -1018,13 +1042,8 @@ class TrayApp(Foundation.NSObject):
         threading.Thread(target=load_model, daemon=True).start()
 
         def read_device_info():
-            try:
-                with VibeKey() as vk:
-                    bat = vk.battery()
-                    info = f"固件 {vk.version()} / 电量 {f'{bat[0]}%' if bat else '?'}"
-            except VibeKeyNotFound:
-                info = "厂商通道未打开"
-            self.set_state(device_info=info)
+            if not self._read_device_status():
+                self.set_state(device_info="厂商通道没打开")
         threading.Thread(target=read_device_info, daemon=True).start()
 
         app = AppKit.NSApplication.sharedApplication()

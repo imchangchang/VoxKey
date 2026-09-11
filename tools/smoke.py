@@ -228,6 +228,48 @@ def pill_show_hide() -> str:
     return "隐藏时不建定时器；重新显示后自己起来；收起时停掉"
 
 
+def pill_meta() -> str:
+    """角标（左上版本 / 右上电量）：不出框、不压状态文字、中间的状态组仍然居中。"""
+    import AppKit
+    from voxkey import pill as P
+
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    p = P.Pill.alloc().initWithHandler_(lambda: None)
+    p.place_bottom(None)
+    p.show()
+
+    # 窄状态（上屏中那种小条）最容易挤：角标必须有地方放，且不能压到状态文字
+    for text, detail in (("上屏中", None), ("听写中", "今天下午三点开会记得带电脑和充电器")):
+        p.set_meta("v4.4.0", "30%")
+        p.set_status(text, AppKit.NSColor.systemBlueColor(), P.Pill.LEAD_NONE, detail)
+        t = p._targets()
+        cw = t["cap"].size.width
+        sf = p.t_status.frame()
+        ml, mr = p.t_meta_l.frame(), p.t_meta_r.frame()
+        if mr.origin.x + mr.size.width > cw + 0.01 or ml.origin.x < -0.01:
+            raise AssertionError(f"{text}：角标出框（胶囊 {cw:.0f}，左 {ml.origin.x:.1f} 右 {mr.origin.x + mr.size.width:.1f}）")
+        if sf.origin.x < ml.origin.x + ml.size.width - 0.01:
+            raise AssertionError(f"{text}：状态文字压到左上角标")
+        if sf.origin.x + sf.size.width > mr.origin.x + 0.01:
+            raise AssertionError(f"{text}：状态文字压到右上角标")
+        off = sf.origin.x + sf.size.width / 2 - cw / 2
+        if abs(off) > 0.6:
+            raise AssertionError(f"{text}：加了角标之后状态文字不再居中（偏 {off:+.1f}pt）")
+
+    # 同一个状态对比：带角标 vs 清空角标，胶囊应该收窄
+    p.set_meta("v4.4.0", "30%")
+    p.set_status("上屏中", AppKit.NSColor.systemBlueColor(), P.Pill.LEAD_NONE, None)
+    with_meta = p._targets()["cap"].size.width
+    p.set_meta("", "")
+    without = p._targets()["cap"].size.width
+    if not (p.t_meta_l.isHidden() and p.t_meta_r.isHidden()):
+        raise AssertionError("角标清空之后没有藏起来")
+    if without >= with_meta:
+        raise AssertionError(f"角标清空之后胶囊没收窄（{with_meta:.0f} → {without:.0f}）")
+    return f"角标不出框、不压状态文字；清空后藏起来并收窄（{with_meta:.0f}→{without:.0f}）"
+
+
 def model_ok() -> str:
     from voxkey.models import MODELS, load_recognizer
     if not MODELS.is_dir():
@@ -255,6 +297,7 @@ def main() -> int:
     ok &= check("长语音预览裁剪", pill_long_preview)
     ok &= check("悬浮条显示规则", pill_wanted_table)
     ok &= check("悬浮条收起再显示", pill_show_hide)
+    ok &= check("悬浮条角标（版本/电量）", pill_meta)
     if args.no_model:
         print(f"{DIM}— 跳过模型加载{END}")
     else:
