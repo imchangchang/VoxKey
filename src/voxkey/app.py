@@ -263,9 +263,9 @@ class KeySupervisor(threading.Thread):
             log("设备", f"厂商通道第一次问不到（{why}）——继续观察（可能只是待机）")
         if self._power_fails >= self.POWER_FAILS_TO_OFF and not self._device_off:
             self._device_off = True
-            self.on_conn(False, "设备已关机", True)
+            self.on_conn(False, "设备待机/关机", True)
             log("设备", f"连续 {self._power_fails} 次问不到，已沉默 {silence:.0f}s（{why}）"
-                        f"——接收器还插着，当关机处理，等你开机")
+                        f"——待机或关机（区分不了），等它醒")
         elif self._device_off and now - self._silence_logged >= 60.0:
             # 长时间沉默时每分钟记一条，好对着时间轴看「沉默是不是卡在待机阈值上」
             self._silence_logged = now
@@ -335,7 +335,6 @@ class TrayApp(Foundation.NSObject):
         self._audio_dirty = False      # 设备掉过线 → 下次录音前重新枚举音频设备
         self._last_unknown: tuple = ()  # 上次报过的未知键码（去重，别刷屏）
         self._woke_device = False       # 这次连接有没有给设备发过唤醒心跳
-        self._wake_tested = False       # 这一轮「问不到」有没有试过用心跳区分待机/关机
         self._standby_logged = False    # 待机阈值每次连接只记一次
         # 每 3 秒问一次厂商通道会一直「吵醒」设备，它自己那个 300 秒待机就永远触发不了。
         # 要观察待机（或单纯省电）时用 VOXKEY_NO_DEVICE_PROBE=1 关掉周期探测，
@@ -509,7 +508,6 @@ class TrayApp(Foundation.NSObject):
         if not connected:
             self._audio_dirty = True      # 设备掉过线，音频设备表要重新枚举（见 _resolve_audio_device）
             self._woke_device = False     # 下次连上要重新唤醒一次
-            self._wake_tested = False
             self._standby_logged = connected is False   # 只真掉线才重记（连接中的 None 别重复刷）
             # 设备不在线时版本/电量读不到，角标要跟着空掉，别留着上一次的旧数字
             self.set_state(connected=connected, reason=reason, device_off=power_off,
@@ -561,7 +559,12 @@ class TrayApp(Foundation.NSObject):
 
     @objc.python_method
     def _wake_device(self) -> None:
-        """发一帧心跳：协议表里这条命令就是「试着唤醒假死的厂商口」。"""
+        """发一帧心跳（协议表里这条命令写的是「试着唤醒假死的厂商口」）。
+
+        实话：实测**叫不醒待机中的设备**（静置 7 分钟后不应答，连发心跳仍不应答）。
+        留着是因为它只花一帧，万一遇到的是「厂商口假死」这种别的毛病还能试试；判断逻辑里
+        不再依赖它——待机和关机就是区分不了。
+        """
         try:
             with VibeKey() as vk:
                 vk.send(P.build_frame(0x06, 0x01, 0x23, 0x00))
@@ -572,31 +575,16 @@ class TrayApp(Foundation.NSObject):
     def _device_power_probe(self) -> str:
         """周期性问一句「设备本体还在吗」。返回 ""=在线，否则返回「为什么问不到」。
 
-        问不到的时候**先敲一帧心跳再判**：待机（协议里 5 分钟没用就不响应厂商口）和真关机
-        在现象上完全一样——HID 枚举在、键盘集合适能打开、CoreAudio 里 AU05 也在，只有厂商通道沉默。
-        能敲醒 → 是待机，继续当在线；敲不醒 → 才更像真关机。这是唯一能区分的办法，
-        心跳本身也是协议表里为这件事准备的（"试着唤醒假死的厂商口"）。
+        **待机和真关机区分不了**，别在这儿白费劲：实测（静置 7 分钟、期间不碰厂商通道也不碰设备）
+        设备 300 秒没用就进待机，之后厂商通道一律不应答；而真关机是同样的现象，连发 heartbeat
+        都叫不醒（试过）。而且待机时**第一次按键会被设备自己吞掉**（用户实测：第一次没反应、
+        第二次才行），所以只能对外说「待机/关机中」，等按键报文来了再翻回在线。
         """
         if self.current_stop is not None:
             return ""                      # 录音中不打扰
         if not self._probe_enabled:
             return ""                      # VOXKEY_NO_DEVICE_PROBE=1：完全不打搅设备
-        why = self._read_device_status()
-        if not why:
-            self._wake_tested = False
-            return ""
-        if self._wake_tested:              # 这一轮沉默已经试过唤醒了，别每 3 秒敲一次
-            return why
-        self._wake_tested = True
-        self._wake_device()
-        time.sleep(0.15)
-        if self._read_device_status() == "":
-            self._wake_tested = False
-            log("设备", f"厂商通道沉默（{why}）→ 发心跳唤醒了：是待机，不是关机（"
-                        f"{self.get_state()['device_info']}）")
-            return ""
-        log("设备", f"厂商通道沉默（{why}）→ 发心跳也没反应：更像真关机/没电")
-        return why
+        return self._read_device_status()
 
     @objc.python_method
     def _audio_device_present(self) -> bool:
@@ -620,7 +608,7 @@ class TrayApp(Foundation.NSObject):
         """
         if not self._woke_device:
             self._woke_device = True
-            self._wake_device()          # 先敲一下（设备待机时厂商口不响应）
+            self._wake_device()          # 先敲一下（聊胜于无，见 _wake_device 的说明）
         if self._read_device_status() != "":
             return False
         return self._audio_device_present()
@@ -803,9 +791,10 @@ class TrayApp(Foundation.NSObject):
         if st["paused"]:
             label, glyph = "已暂停", "○"
         elif st["device_off"]:
-            # 接收器插着但设备本体关机：HID 枚举、键盘集合、CoreAudio 全都说「在」，
-            # 只有厂商通道不应答——见 KeySupervisor._check_device_power
-            label, glyph = "设备已关机", "○"
+            # 厂商通道沉默。实测（静置 7 分钟、一个厂商帧都不发）：设备 300 秒不用就进待机，
+            # 进待机后厂商通道完全不应答。而真关机的现象**一模一样**——HID 枚举在、键盘集合
+            # 能开、CoreAudio 里 AU05 也在，连发 heartbeat 都叫不醒（实测）。所以只能说「待机/关机中」。
+            label, glyph = "设备待机/关机中", "○"
         elif st["connected"] is False:
             label, glyph = "设备未连接", "○"
         elif phase == PHASE_ERR:                     # 未上屏：把原因写出来
