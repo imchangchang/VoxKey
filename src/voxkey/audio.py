@@ -56,6 +56,24 @@ def has_speech(audio: np.ndarray, sr: int = SAMPLE_RATE) -> tuple[bool, float, f
     return (sec >= SPEECH_MIN_SEC and peak >= SPEECH_MIN_PEAK), sec, peak
 
 
+
+def reload_audio_devices() -> None:
+    """重新枚举音频设备（Pa_Terminate + Pa_Initialize）。
+
+    真机踩到：USB 接收器插拔之后 PortAudio 的设备表还是旧的——`sd.query_devices()` 照样
+    把 AU05 报在原来的编号上，于是我们拿着一个已经不存在的设备去 open，报
+    `-10851 (Audio Unit: Invalid Property Value)` 再 `-9986`，而新起一个进程立刻就能录
+    （新进程会重新枚举）。不重新初始化就永远打不开。
+    `_terminate/_initialize` 是 sounddevice 的私有 API，但它自己的 FAQ 就是这么写的，
+    而且调用点是「刚打不开、手里没有任何 stream」的时候，代价只是几十毫秒。
+    """
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception as e:
+        log("音频", f"重载 PortAudio 设备表失败：{e}")
+
+
 def find_input_device(name_hint: str = "AU05") -> int | None:
     """按名字找录音设备；找不到返回 None（用系统默认）。"""
     if not name_hint:

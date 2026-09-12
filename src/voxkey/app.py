@@ -42,9 +42,10 @@ import Foundation  # noqa: E402
 import Quartz  # noqa: E402
 
 from voxkey.audio import (SPEECH_MIN_PEAK, SPEECH_MIN_SEC, Recorder, find_input_device,
-                          has_speech)
+                          has_speech, reload_audio_devices)
 from voxkey.device import protocol as P
 from voxkey.device.device import VibeKey
+from voxkey.devicewatch import DeviceState, DeviceWatch
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, MOD_CTRL,
                                      MOD_OPT, DeviceKeyReader, find_keyboard_path)
 from voxkey.inject import Injector, ax_trusted, frontmost_info, reactivate
@@ -166,145 +167,6 @@ class SingleInstance:
         return True
 
 
-# ---------------------------------------------------------------- 设备看守
-
-class KeySupervisor(threading.Thread):
-    """看着 AU05 的键盘集合：掉线 → 标记未连接并停 reader，插回来 → 自动重启。
-
-    「插回来」不等于「能用了」：键盘集合能打开只是拿到了句柄，实测插拔接收器之后还有约 3.6 秒
-    设备一个按键报文都不发（固件/音频子系统还没起来）。所以打开之后先等 `ready_probe` 成立
-    再报「已连接」——用户在提示消失的那一刻按键就必须能用（用户要求）。
-    """
-
-    READY_TIMEOUT_S = 5.0    # 等设备证明自己可用的上限；超时按「设备不在线」处理（开机会被周期探测纠正）
-    READY_SETTLE_S = 1.0     # 集合打开后至少等这么久再判就绪（纯保险）
-    POWER_PROBE_EVERY_S = 3.0    # 周期探测设备本体的间隔（厂商通道答不答话）
-    POWER_FAILS_TO_OFF = 2       # 连续几次不应答才算「关机」，防单次抖动误报
-
-    def __init__(self, on_key, on_conn, stop_event: threading.Event, ready_probe=None,
-                 device_alive=None):
-        super().__init__(daemon=True)
-        self.on_key = on_key
-        self.on_conn = on_conn
-        self.stop_event = stop_event
-        self.ready_probe = ready_probe        # () -> bool：设备真的能用了么（见 TrayApp._device_ready）
-        self.device_alive = device_alive      # () -> str：""=设备本体在线；否则是「为什么问不到」
-        self.reader: DeviceKeyReader | None = None
-        self._dropped_reason: str | None = None   # 同一条掉线原因只报一次，别每 2 秒刷一遍日志
-        self._device_off = False
-        self._power_fails = 0
-        self._last_power_probe = 0.0
-        self._last_alive = time.monotonic()   # 最后一次「设备应答」的时刻，用来算沉默多久
-        self._silence_logged = 0.0
-
-    def run(self) -> None:
-        while not self.stop_event.is_set():
-            if find_keyboard_path() is None:
-                self._drop("设备未连接")
-                self.stop_event.wait(2.0)
-                continue
-            if self.reader is not None and not self.reader.is_alive():
-                # 设备还在（枚举得到），但读线程已经死了：多半是拔插过接收器，hidapi 句柄失效。
-                err = self.reader.error
-                self._drop(f"按键读取中断（{err}），等你插回来" if err else "按键读取中断，等你插回来")
-            if self.reader is None:
-                try:
-                    self.reader = DeviceKeyReader(self.on_key).start()
-                except Exception as e:
-                    self.on_conn(False, f"打不开：{e}")
-                    self.stop_event.wait(2.0)
-                    continue
-                self.on_conn(None)                # 句柄有了，但设备还没证明自己能发按键
-                log("设备", "键盘集合已打开，等设备就绪…")
-                t0 = time.monotonic()
-                ok = self._wait_ready()
-                ms = (time.monotonic() - t0) * 1000
-                if ok:
-                    self._dropped_reason = None
-                    self._device_off = False
-                    self.on_conn(True)
-                    log("设备", f"就绪（探测通过，用时 {ms:.0f}ms），语音键监听中")
-                else:
-                    # 接收器在、句柄也开得了，唯一解释就是设备本体没开机（或没电了）。
-                    # 不关 reader：设备一开机，同一个句柄就能重新收到按键。
-                    self._device_off = True
-                    self.on_conn(False, "设备已关机", True)
-                    log("设备", f"打开句柄用了 {ms:.0f}ms，但设备本体不应答——关机/没电？等它开机")
-            self._check_device_power()
-            self.stop_event.wait(2.0)
-
-    def _check_device_power(self) -> None:
-        """周期性地问一句「设备本体还在吗」。
-
-        为什么不能靠 HID 枚举/键盘集合/CoreAudio 判断：实测「接收器插着但键盘关机」时，
-        HID 里 if2/if3 都还在、键盘集合照样能打开、CoreAudio 里 AU05 也还在——三者全都说
-        「在」，只有厂商通道不应答；键盘一开机，厂商通道立刻回 version 和电量。
-        所以判据只能是厂商通道答不答话；而「答不答话」还要再分待机和关机，交给
-        TrayApp._device_power_probe 用一帧心跳去区分（见那里的注释）。
-        """
-        if self.device_alive is None or self.reader is None:
-            return
-        now = time.monotonic()
-        if now - self._last_power_probe < self.POWER_PROBE_EVERY_S:
-            return
-        self._last_power_probe = now
-        why = self.device_alive()          # "" = 在线；否则是「为什么问不到」
-        if not why:
-            self._last_alive = now
-            self._power_fails = 0
-            if self._device_off:
-                self._device_off = False
-                self._silence_logged = 0.0
-                self._dropped_reason = None
-                self.on_conn(True)
-                log("设备", "设备本体应答了，语音键监听中")
-            return
-        self._power_fails += 1
-        silence = now - self._last_alive
-        if self._power_fails == 1:
-            log("设备", f"厂商通道第一次问不到（{why}）——继续观察（可能只是待机）")
-        if self._power_fails >= self.POWER_FAILS_TO_OFF and not self._device_off:
-            self._device_off = True
-            self.on_conn(False, "设备待机/关机", True)
-            log("设备", f"连续 {self._power_fails} 次问不到，已沉默 {silence:.0f}s（{why}）"
-                        f"——待机或关机（区分不了），等它醒")
-        elif self._device_off and now - self._silence_logged >= 60.0:
-            # 长时间沉默时每分钟记一条，好对着时间轴看「沉默是不是卡在待机阈值上」
-            self._silence_logged = now
-            log("设备", f"仍问不到（已沉默 {silence:.0f}s，最后一次应答在 "
-                        f"{time.strftime('%H:%M:%S', time.localtime(time.time() - silence))}）")
-
-    def _wait_ready(self) -> bool:
-        """等到 ready_probe 说「能用」。没有探针就只等 settle。"""
-        t0 = time.monotonic()
-        while not self.stop_event.is_set() and time.monotonic() - t0 < self.READY_TIMEOUT_S:
-            settled = (time.monotonic() - t0) >= self.READY_SETTLE_S
-            if settled and (self.ready_probe is None or self.ready_probe()):
-                return True
-            self.stop_event.wait(0.25)
-        return False
-
-    def _drop(self, reason: str) -> None:
-        had_reader = self.reader is not None
-        if had_reader:
-            try:
-                self.reader.stop()
-            except Exception:
-                pass
-            self.reader = None
-        self._device_off = False          # 接收器都没了，「设备关机」这个判断已经没意义
-        self._power_fails = 0
-        # 首次掉线（包括「启动时设备就没插」，这时本来就没有 reader）必须报出去：
-        # 只报 had_reader 的话 connected 会一直是 None，菜单永远显示「设备探测中」。
-        if had_reader or self._dropped_reason != reason:
-            self.on_conn(False, reason)
-            log("设备", reason)
-        self._dropped_reason = reason
-
-    def reconnect(self) -> None:
-        self._drop("手动重连")
-
-
 # ---------------------------------------------------------------- 菜单栏 App
 
 class TrayApp(Foundation.NSObject):
@@ -316,6 +178,14 @@ class TrayApp(Foundation.NSObject):
         self.args = args
         self.decoder = None
         self.injector = Injector(newline_mode=args.newline)   # 只走不碰剪贴板的两条路
+        from voxkey.pipeline import SpeakingPipeline, PipelineConfig
+        self.pipeline = SpeakingPipeline(
+            decoder=None,   # 模型加载完成后在 load_model 里补上
+            config=PipelineConfig(min_audio_s=args.min_audio_s, device_hint=args.device,
+                                  newline_mode=args.newline),
+            injector=self.injector,
+            archive_dir=args.save_audio,
+            on_archive=lambda wav, summ: log("存档", f"{wav}  {summ}"))
         self.audio_device = None
         self.supervisor = None
         self.stop_event = threading.Event()
@@ -402,8 +272,9 @@ class TrayApp(Foundation.NSObject):
         if keys and (st["device_off"] or st["connected"] is False):
             # 收到按键 = 设备明明活着：刚才那个「关机」判定错了（多半只是进了待机，或者是我们
             # 探测时它正在打盹）。立刻翻回在线，别让用户对着「设备已关机」按半天。
-            log("设备", "收到按键报文——设备在线（此前的『设备已关机』是待机或误判）")
-            self.on_conn(True, linger="已唤醒")
+            log("设备", "收到按键报文——设备在线（此前的『待机/关机』是它在打盹或误判）")
+            self.supervisor._emit(DeviceState.READY, "")   # 按键来了 = 设备活着，翻回在线
+            self._set_linger("已唤醒", AppKit.NSColor.systemGreenColor())
             st = self.get_state()
         ptt = (KC_VOICE in keys
                or (KC_F9 in keys and (mods & (MOD_CTRL | MOD_OPT | MOD_CMD)) ==
@@ -434,23 +305,6 @@ class TrayApp(Foundation.NSObject):
             self._stop_recording(f"松开（按住 {hold_ms:.0f}ms）")
 
     @objc.python_method
-    def _reload_audio_devices(self) -> None:
-        """重新枚举音频设备（Pa_Terminate + Pa_Initialize）。
-
-        真机踩到：USB 接收器插拔之后 PortAudio 的设备表还是旧的——`sd.query_devices()` 照样
-        把 AU05 报在原来的编号上，于是我们拿着一个**已经不存在的设备**去 open，报
-        `-10851 (Audio Unit: Invalid Property Value)` 再 `-9986`，而新起一个进程立刻就能录
-        （新进程会重新枚举）。不重新初始化就永远打不开。
-        `_terminate/_initialize` 是 sounddevice 的私有 API，但它自己的 FAQ 就是这么写的，
-        而且调用点是「刚打不开、手里没有任何 stream」的时候，代价只是几十毫秒。
-        """
-        try:
-            sd._terminate()
-            sd._initialize()
-        except Exception as e:
-            log("音频", f"重载 PortAudio 设备表失败：{e}")
-
-    @objc.python_method
     def _resolve_audio_device(self) -> int | None:
         """每次录音前重新解析输入设备。
 
@@ -462,7 +316,7 @@ class TrayApp(Foundation.NSObject):
             # 设备掉线过（插拔接收器）：PortAudio 的设备表还是旧的，**必须先重新枚举再解析编号**，
             # 否则解析出来的还是旧表里的旧编号。这样插回来第一次按键就能直接录上。
             self._audio_dirty = False
-            self._reload_audio_devices()
+            reload_audio_devices()
         dev = find_input_device(self.args.device)
         if dev != self.audio_device:
             try:
@@ -506,27 +360,26 @@ class TrayApp(Foundation.NSObject):
         threading.Thread(target=self.handle_utterance, args=(stop_ev), daemon=True).start()
 
     @objc.python_method
-    def on_conn(self, connected: bool, reason: str = "", power_off: bool = False,
-                linger: str = "") -> None:
+    def on_device_state(self, state: DeviceState, reason: str = "") -> None:
+        """设备状态变化（来自 DeviceWatch 线程）：翻成 state 字典里的字段并处理副作用。"""
         prev = self.get_state()
-        if not connected:
-            self._audio_dirty = True      # 设备掉过线，音频设备表要重新枚举（见 _resolve_audio_device）
+        if state is not DeviceState.READY:
+            self._audio_dirty = True      # 掉过线/还没就绪，音频设备表要重新枚举
             self._woke_device = False     # 下次连上要重新唤醒一次
-            self._standby_logged = connected is False   # 只真掉线才重记（连接中的 None 别重复刷）
-            # 设备不在线时版本/电量读不到，角标要跟着空掉，别留着上一次的旧数字
-            self.set_state(connected=connected, reason=reason, device_off=power_off,
+            self._standby_logged = state is DeviceState.DISCONNECTED   # 只真掉线才重记
+            # 设备不在线时版本/电量读不到，角标跟着空掉，别留着上一次的旧数字
+            self.set_state(connected=(state is not DeviceState.DISCONNECTED),
+                           reason=reason, device_off=state is DeviceState.STANDBY_OR_OFF,
                            fw_version="", battery_pct=None, battery_mv=None,
                            battery_charging=False)
             return
-        if connected is True:
-            green = AppKit.NSColor.systemGreenColor()
-            if linger:
-                self._set_linger(linger, green)
-            elif prev["device_off"]:
-                self._set_linger("已开机", green)          # 关机→开机：先说一声再收起（用户要求）
-            elif prev["connected"] is None:
-                self._set_linger("已连接", green)          # 连接中→就绪：同理
-        self.set_state(connected=connected, reason=reason, device_off=power_off)
+        # 就绪那一刻：关机→开机说「已开机」，连接中→就绪说「已连接」（用户要求消失前先说一声）
+        green = AppKit.NSColor.systemGreenColor()
+        if prev["device_off"]:
+            self._set_linger("已开机", green)
+        elif prev["connected"] is None:
+            self._set_linger("已连接", green)
+        self.set_state(connected=True, reason="", device_off=False)
 
     # ---------- 设备「真的能用了吗」（插回来时报「已连接」之前先过这一关） ----------
 
@@ -601,7 +454,7 @@ class TrayApp(Foundation.NSObject):
         """
         if self.current_stop is not None:
             return True
-        self._reload_audio_devices()
+        reload_audio_devices()
         return find_input_device(self.args.device) is not None
 
     @objc.python_method
@@ -641,7 +494,7 @@ class TrayApp(Foundation.NSObject):
             # 打不开基本上是插拔过接收器：PortAudio 的设备表还是旧的（见 _reload_audio_devices），
             # 先重新枚举再重解析编号，然后重试一次。
             log("音频", f"打不开（{e1}），重新枚举音频设备后重试")
-            self._reload_audio_devices()
+            reload_audio_devices()
             self._resolve_audio_device()
             log("音频", f"重载后设备表 {len(sd.query_devices())} 个，AU05 → " +
                         (f"#{self.audio_device} {sd.query_devices(self.audio_device)['name']}"
@@ -707,24 +560,25 @@ class TrayApp(Foundation.NSObject):
 
     @objc.python_method
     def _finish_utterance(self, cap, samples, t_release, t_rec_stop, cancelled: bool = False) -> None:
-        # 取消状态必须在外面读、传进来：caller 已经 clear 了 cancel_event，在这里再读永远是 False
-        if cancelled:
+        """一次说话的收尾：四道闸 → 解码 → 上屏。业务判断都在 pipeline，这里只管状态与提示。"""
+        gate = self.pipeline.gates(samples, cancelled, self.min_audio_s)
+        if gate == "cancelled":               # 取消状态必须在外面读、传进来：caller 已 clear 掉事件
             self.set_state(phase=PHASE_IDLE)
             return
         dur = len(samples) / SAMPLE_RATE
         hold_ms = (t_release - self.get_state().get("t_press", t_release)) * 1000
-        self._archive_audio(cap, samples, hold_ms)
         rms = float(np.sqrt((samples ** 2).mean())) if len(samples) else 0.0
-        spoken, sp_sec, sp_peak = has_speech(samples)
+        _, sp_sec, sp_peak = has_speech(samples)
+        self.pipeline.archive(samples, hold_ms)
         log("音频", f"按住 {hold_ms:.0f}ms → 录到 {dur:.2f}s，RMS {rms:.4f}，"
                     f"像说话的时长 {sp_sec:.2f}s（峰值 {sp_peak:.4f}）")
-        if dur < self.min_audio_s:            # 太短：不送模型，免得被脑补出「嗯」这类填充词
+        if gate == "too_short":               # 太短：不送模型，免得被脑补出「嗯」这类填充词
             log("忽略", f"只录到 {dur:.2f}s（< {self.min_audio_s:.2f}s），这次丢掉")
             self.set_state(phase=PHASE_IDLE, last_text="",
                            injected=f"未上屏：只录到 {dur:.2f}s（太短，已忽略）",
                            result_ts=time.monotonic())
             return
-        if not spoken:
+        if gate == "no_speech":
             # 没有有效语音就别送模型——它会对着底噪脑补出「嗯。」（用户报的问题）。
             # 判据见 audio.has_speech：自适应底噪 + 像说话的总时长 + 峰值。
             log("忽略", f"没检测到说话（像说话的时长 {sp_sec:.2f}s < {SPEECH_MIN_SEC}s "
@@ -733,9 +587,7 @@ class TrayApp(Foundation.NSObject):
                            injected=f"未上屏：没听到说话（{sp_sec:.1f}s 有效语音）",
                            result_ts=time.monotonic())
             return
-        text = cap.decode(samples)
-        t_decoded = time.monotonic()
-        ms = (t_decoded - t_rec_stop) * 1000
+        text, decode_ms = self.pipeline.transcribe(samples)
         if not text:
             log("结果", f"（{dur:.1f}s 没听清）")
             self.set_state(phase=PHASE_IDLE, last_text="")
@@ -746,7 +598,7 @@ class TrayApp(Foundation.NSObject):
                         f"按 --newline={self.injector.newline_mode} 处理（避免在微信/Slack 里误发送）")
         seg = f"{self.decoder.last_segments} 段，" if self.decoder.last_segments > 1 else ""
         fin = f"其中 {cap.finalized_segments} 段录音期间已定稿，" if cap.finalized_segments else ""
-        log("结果", f"{text}   [音频 {dur:.1f}s，{seg}{fin}松手→出字 {ms:.0f}ms]")
+        log("结果", f"{text}   [音频 {dur:.1f}s，{seg}{fin}松手→出字 {decode_ms:.0f}ms]")
 
         # 上屏前先把「按下语音键那一刻的前台 App」拉回前台：中途切窗口的话，
         # 字会打进错误的窗口（Wispr 也是存焦点元素 + 粘贴前还原）。
@@ -761,15 +613,12 @@ class TrayApp(Foundation.NSObject):
                                         f"但你切到了「{cur_name}」且拉不回来")
                 log("输出", self.state["injected"])
                 return
-        try:
-            injected = self.injector.inject(text)
-        except Exception as e:
-            injected = f"未上屏：注入异常 {e}"
+        injected, inject_ms = self.pipeline.inject(text)
         log("输出", f"{injected}   [松手→停录 {(t_rec_stop - t_release) * 1000:.0f}ms"
                     f"（关流 {cap.stream_stop_ms:.0f}+{cap.stream_close_ms:.0f}ms"
                     f"）"
-                    f"+ 解码 {ms:.0f}ms"
-                    f" + 上屏 {self.injector.ax_ms + self.injector.type_ms:.0f}ms"
+                    f"+ 解码 {decode_ms:.0f}ms"
+                    f" + 上屏 {inject_ms:.0f}ms"
                     f" = 松手→完成 {(time.monotonic() - t_release) * 1000:.0f}ms]")
         self.set_state(phase=PHASE_IDLE, last_text=text, injected=injected,
                        result_ts=time.monotonic())
@@ -1132,9 +981,15 @@ class TrayApp(Foundation.NSObject):
     def applicationDidFinishLaunching_(self, _note):
         self.setup_ui()
         if not self.args.no_device:
-            self.supervisor = KeySupervisor(self.on_key_state, self.on_conn, self.stop_event,
-                                            ready_probe=self._device_ready,
-                                            device_alive=self._device_power_probe)
+            self.supervisor = DeviceWatch(
+                on_key=self.on_key_state, on_state=self.on_device_state,
+                stop_event=self.stop_event,
+                ready_probe=self._device_ready,
+                power_probe=self._device_power_probe,
+                audio_present=self._audio_device_present,
+                reload_audio=reload_audio_devices,
+                is_recording=lambda: self.current_stop is not None,
+                device_hint=self.args.device)
             self.supervisor.start()
         else:
             self.set_state(connected=False, reason="--no-device 模式")
