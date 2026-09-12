@@ -102,6 +102,9 @@ class Recorder:
         self.finalized_text = ""
         self.finalized_n = 0            # 定稿覆盖到的采样数
         self.finalized_segments = 0     # 定稿了几段（日志用）
+        # 预览自己的一套（与上面的定稿无关）：见 PREVIEW_COMMIT_S 的说明
+        self.pv_text = ""
+        self.pv_n = 0                   # 预览「已提交」覆盖到的采样数
 
     def _callback(self, indata, frames, t, status):
         block = indata[:, 0].copy()
@@ -112,6 +115,8 @@ class Recorder:
     def start(self) -> None:
         self.chunks = []
         self.preview_text = ""
+        self.pv_text = ""
+        self.pv_n = 0
         self.stream = sd.InputStream(device=self.device, samplerate=SAMPLE_RATE, channels=1,
                                      dtype="float32", blocksize=BLOCK, callback=self._callback)
         self.stream.start()
@@ -175,7 +180,14 @@ class Recorder:
     def decode(self, samples: np.ndarray) -> str:
         return _join_parts([self.finalized_text, self.decode_rest(samples)])
 
-    PREVIEW_WINDOW_S = 20.0  # 预览只看最近这段：模型上下文（512 token ≈ 28s）放不下更长的
+    # 预览自己一套「滚动提交」：每攒够 PREVIEW_COMMIT_S 就把这一段解出来接进预览文本，
+    # 于是「尾巴」永远只覆盖还没提交的那一小段，每轮重解的代价就从 20 秒降到几秒。
+    # 为什么要独立于最终路径：两者都能显示全，但代价差一个数量级。
+    #   最终路径用 22 秒段（和松手后的解码同一套切分，所以上下屏的文字一致）；
+    #   预览要的是「跟得上说话」，用 6 秒粒度滚——代价是预览文字与最终文字会差几个百分点
+    #   （实测 6 秒粒度 vs 22 秒粒度差 1.9%~6.3%），这是用户拍板接受的取舍。
+    PREVIEW_COMMIT_S = 6.0   # 预览自己的提交粒度
+    PREVIEW_WINDOW_S = 8.0   # 预览尾巴窗口：要盖住「还没提交」的那部分（提交规则保证它 ≤ 6 秒多一点）
     PREVIEW_RATE = 14.0      # 模型解码速度（倍实时，实测：4s 287ms / 8s 597ms / 20s 1464ms）
 
     def preview_interval(self) -> float:
@@ -206,12 +218,20 @@ class Recorder:
                 ok, sec, peak = has_speech(self.samples)
                 if not ok:
                     return
-                # 这一轮**永远**是「已定稿 + 尾巴」，不能因为刚定稿了一段就只显示已定稿部分——
-                # 那样最近说的那一整段会从预览里消失（实测字数会从 72 掉回 64，用户看到的就是
-                # 「没把我说的话全部显示出来」）。
-                rest = self.samples[self.finalized_n:]
+                # ① 提交：攒够一段就把这段解出来接进预览文本，尾巴因此一直很短。
+                #    切点仍然由 split_for_model 挑停顿，不会在字中间断开。
+                rest = self.samples[self.pv_n:]
+                if len(rest) > int(self.PREVIEW_COMMIT_S * SAMPLE_RATE):
+                    segs = split_for_model(rest, max_s=self.PREVIEW_COMMIT_S)
+                    if len(segs) >= 2:            # 切得出完整一段才提交，否则再等等
+                        piece = segs[0]
+                        self.pv_text = _join_parts([self.pv_text, self.decoder.decode(piece)])
+                        self.pv_n += len(piece)
+                # ② 显示：已提交 + 尾巴。尾巴很短（≤ 一个提交粒度），所以每轮都解得动，
+                #    预览就跟得上说话了。这一轮**永远**两头都算，不会把最近说的丢掉。
+                rest = self.samples[self.pv_n:]
                 part = self.decoder.decode(tail_window(rest, self.PREVIEW_WINDOW_S)) if len(rest) else ""
-                text = _join_parts([self.finalized_text, part])
+                text = _join_parts([self.pv_text, part])
                 if text and not looks_degenerate(text):  # 重复死循环的预览别刷屏
                     self.preview_text = text
                     if self.on_preview:
