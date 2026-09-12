@@ -16,11 +16,9 @@ import time
 import numpy as np
 import sounddevice as sd
 
-from voxkey.transcribe import (SAMPLE_RATE, Decoder, _join_parts, looks_degenerate,
-                               split_for_model, tail_window)
+from voxkey.transcribe import SAMPLE_RATE, Decoder, _join_parts, looks_degenerate, split_for_model
 
 BLOCK = 1600             # 100ms
-PREVIEW_INTERVAL = 0.8   # 伪流式重解码间隔
 MAX_UTTERANCE_S = 60     # 单次说话上限
 
 # 「到底有没有人在说话」的判据。原来的 RMS 闸门（0.002）太松：用户按了键什么都没说，
@@ -75,36 +73,27 @@ class Recorder:
     这样上一句还在解码时又能开始下一句，不会互相踩。
     """
 
-    def __init__(self, decoder: Decoder, device: int | None, on_preview=None, is_busy=None,
+    def __init__(self, decoder: Decoder, device: int | None, is_busy=None,
                  on_level=None):
         self.decoder = decoder
         self.device = device
-        self.on_preview = on_preview
         # on_level(rms)：每块音频回调一次，给悬浮条的波形用（跑在音频线程上，实现要够快，
         # 只做「存一个 float」这种量级的事，别在里面碰 UI）。
         self.on_level = on_level
         # is_busy()：上一句还在解码/上屏时返回 True——这时预览要让路，否则两边抢模型通道，
         # 表现就是「松开再按，第二次跟不上」（用户实测反馈）。
         self.is_busy = is_busy
-        self.skipped_previews = 0
         self.q: queue.Queue = queue.Queue()
         self.chunks: list[np.ndarray] = []
         self.stream: sd.InputStream | None = None
-        self._preview_busy = threading.Event()
-        self.preview_wait_ms = 0.0
-        self.last_preview_ms = 0.0
         self.stream_stop_ms = 0.0
         self.stream_close_ms = 0.0
-        self.preview_text = ""
         # 「定稿」：录音期间就已经录满一整段、并且已经解完的音频。长语音的解码耗时是随长度
         # 线性涨的（本机实测每 22 秒一段约 1.0 秒），松手后一次性解完的话，说得越长等得越久
         # （38 秒的话实测 2.2 秒）。边录边把满段解掉，松手就只剩最后一段要解，延迟与长度无关。
         self.finalized_text = ""
         self.finalized_n = 0            # 定稿覆盖到的采样数
         self.finalized_segments = 0     # 定稿了几段（日志用）
-        # 预览自己的一套（与上面的定稿无关）：见 PREVIEW_COMMIT_S 的说明
-        self.pv_text = ""
-        self.pv_n = 0                   # 预览「已提交」覆盖到的采样数
 
     def _callback(self, indata, frames, t, status):
         block = indata[:, 0].copy()
@@ -114,7 +103,6 @@ class Recorder:
 
     def start(self) -> None:
         self.chunks = []
-        self.preview_text = ""
         self.pv_text = ""
         self.pv_n = 0
         self.stream = sd.InputStream(device=self.device, samplerate=SAMPLE_RATE, channels=1,
@@ -131,11 +119,6 @@ class Recorder:
             self.stream.close()
             self.stream_close_ms = (time.monotonic() - t) * 1000
             self.stream = None
-        # 预览只是画面效果，别让松手等它：真机上曾因为这里 wait(5) 白等满 5 秒，
-        # 表现为「松开键后转写中很久」。最终解码本来就要抢 Decoder 的锁，等它没意义。
-        t0 = time.monotonic()
-        self._preview_busy.wait(0.15)
-        self.preview_wait_ms = (time.monotonic() - t0) * 1000
         return np.concatenate(self.chunks) if self.chunks else np.zeros(0, dtype=np.float32)
 
     @property
@@ -180,92 +163,14 @@ class Recorder:
     def decode(self, samples: np.ndarray) -> str:
         return _join_parts([self.finalized_text, self.decode_rest(samples)])
 
-    # 预览自己一套「滚动提交」：每攒够 PREVIEW_COMMIT_S 就把这一段解出来接进预览文本，
-    # 于是「尾巴」永远只覆盖还没提交的那一小段，每轮重解的代价就从 20 秒降到几秒。
-    # 为什么要独立于最终路径：两者都能显示全，但代价差一个数量级。
-    #   最终路径用 22 秒段（和松手后的解码同一套切分，所以上下屏的文字一致）；
-    #   预览要的是「跟得上说话」，用 6 秒粒度滚——代价是预览文字与最终文字会差几个百分点
-    #   （实测 6 秒粒度 vs 22 秒粒度差 1.9%~6.3%），这是用户拍板接受的取舍。
-    PREVIEW_COMMIT_S = 6.0   # 预览自己的提交粒度
-    PREVIEW_WINDOW_S = 8.0   # 预览尾巴窗口：要盖住「还没提交」的那部分（提交规则保证它 ≤ 6 秒多一点）
-    PREVIEW_RATE = 14.0      # 模型解码速度（倍实时，实测：4s 287ms / 8s 597ms / 20s 1464ms）
-
-    def preview_interval(self) -> float:
-        """下一轮预览至少隔多久再踢。
-
-        解码耗时是**线性**于音频长度的（见 PREVIEW_RATE），而这里原来写死 0.8 秒踢一次、
-        每次都要重解整个 20 秒尾巴（1.46 秒）——解码器几乎一直忙着、大量轮次被直接跳过，
-        表现就是用户说的「越说越卡、预览的进度随语音时长线性变差」。按上一轮实测耗时来定间隔，
-        踢了也白踢的那些轮次就没了（忙的时候本来也会被 _preview_busy 挡掉）。
-
-        上限 3 秒是保险：机器负载高的时候同一段音频能慢好几倍（实测同一输入 0.54s vs 3.44s），
-        没有上限的话一轮慢了会把后面的间隔也顶得很长，预览就彻底停住了。
-        """
-        return max(PREVIEW_INTERVAL, min(self.last_preview_ms / 1000.0 * 1.25, 3.0))
-
-    def kick_preview(self) -> None:
-        if self.is_busy and self.is_busy():
-            self.skipped_previews += 1
-            return
-        if self._preview_busy.is_set():
-            return
-        # 长句只预览尾巴（模型上下文放不下全文），起点对齐停顿；已定稿的部分直接拼在前面。
-        def work():
-            t0 = time.monotonic()
-            try:
-                # 还没听到人说话就别喂模型：没有有效语音时它会对着底噪脑补出「嗯。」这类字，
-                # 而预览是直接显示给用户看的（用户报的就是「按了没说话，听写中却有字」）。
-                ok, sec, peak = has_speech(self.samples)
-                if not ok:
-                    return
-                # ① 提交：攒够一段就把这段解出来接进预览文本，尾巴因此一直很短。
-                #    切点仍然由 split_for_model 挑停顿，不会在字中间断开。
-                rest = self.samples[self.pv_n:]
-                if len(rest) > int(self.PREVIEW_COMMIT_S * SAMPLE_RATE):
-                    segs = split_for_model(rest, max_s=self.PREVIEW_COMMIT_S)
-                    if len(segs) >= 2:            # 切得出完整一段才提交，否则再等等
-                        piece = segs[0]
-                        self.pv_text = _join_parts([self.pv_text, self.decoder.decode(piece)])
-                        self.pv_n += len(piece)
-                # ② 显示：已提交 + 尾巴。尾巴很短（≤ 一个提交粒度），所以每轮都解得动，
-                #    预览就跟得上说话了。这一轮**永远**两头都算，不会把最近说的丢掉。
-                rest = self.samples[self.pv_n:]
-                part = self.decoder.decode(tail_window(rest, self.PREVIEW_WINDOW_S)) if len(rest) else ""
-                text = _join_parts([self.pv_text, part])
-                if text and not looks_degenerate(text):  # 重复死循环的预览别刷屏
-                    self.preview_text = text
-                    if self.on_preview:
-                        self.on_preview(text)
-                    else:
-                        print(f"\r\033[K  预览: {text}", end="", flush=True)
-                # 满段定稿放在**显示之后**：它是为松手后的最终解码省时间（22 秒音频要 1.8 秒），
-                # 跟这一轮显示什么无关，放前面只会把显示往后拖。
-                self._finalize_closed()
-            except Exception as e:  # 预览失败不影响主流程
-                print(f"\r\033[K  [预览失败] {e}", flush=True)
-            finally:
-                # 整轮（含定稿）的耗时，用来定下一轮的间隔——见 preview_interval()
-                self.last_preview_ms = (time.monotonic() - t0) * 1000
-                if self.last_preview_ms > 4000:   # 慢得离谱就记一笔，方便对照系统负载排查
-                    print(f"\r\033[K  [预览这一轮花了 {self.last_preview_ms:.0f}ms]", flush=True)
-                self._preview_busy.clear()
-
-        self._preview_busy.set()
-        threading.Thread(target=work, daemon=True).start()
-
     def run_until(self, should_stop) -> np.ndarray:
-        """采到 should_stop() 为真（或超时）为止，期间刷新预览。"""
-        last_preview = 0.0
+        """采到 should_stop() 为真（或超时）为止。"""
         t0 = time.monotonic()
         while not should_stop():
             self.drain()
             if time.monotonic() - t0 > MAX_UTTERANCE_S:
                 print("\n（到 60 秒上限，自动停止）")
                 break
-            dur = len(self.chunks) * BLOCK / SAMPLE_RATE
-            if dur > 0.5 and time.monotonic() - last_preview > self.preview_interval():
-                last_preview = time.monotonic()
-                self.kick_preview()
             time.sleep(0.02)
         self.drain()
         print()

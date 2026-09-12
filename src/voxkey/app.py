@@ -79,7 +79,7 @@ LINGER_S = 1.2          # 悬浮条收起之前，先把「收场状态」显示
 PHASE_META = {
     PHASE_IDLE: ("circle", None, "空闲", "○"),
     PHASE_REC: ("circle.fill", (1.00, 0.30, 0.30, 1.0), "听写中", "●"),
-    PHASE_PROC: ("circle.dotted", (0.30, 0.55, 1.00, 1.0), "上屏中", "◐"),
+    PHASE_PROC: ("circle.dotted", (0.30, 0.55, 1.00, 1.0), "处理中", "◐"),
     PHASE_ERR: ("exclamationmark.circle", (1.00, 0.60, 0.10, 1.0), "未上屏", "○"),
 }
 
@@ -323,10 +323,11 @@ class TrayApp(Foundation.NSObject):
         self.current_stop = None
         self._checked_visibility = False
         self._flash = None
+        self._icon_key = None           # 上次设过的菜单栏图标（状态没变就不重建图片）
         self.state_lock = threading.Lock()
         self.state = {
             "phase": PHASE_IDLE, "connected": None, "reason": "", "paused": False,
-            "last_text": "", "preview": "", "device_info": "设备信息读取中…",
+            "last_text": "", "device_info": "设备信息读取中…",
             "mic_ok": None, "post_ok": None, "injected": "", "device_off": False,
             "fw_version": "", "battery_pct": None, "battery_mv": None,
             "battery_charging": False,          # 悬浮条角标（电量/电压/是否充电）
@@ -495,14 +496,14 @@ class TrayApp(Foundation.NSObject):
             return
         self._resolve_audio_device()
         stop_ev = threading.Event()
-        self.current_stop = (stop_ev,)
+        self.current_stop = (stop_ev)
         self.cancel_event.clear()
-        self.set_state(phase=PHASE_REC, preview="", reason="")
+        self.set_state(phase=PHASE_REC, reason="")
         self.state["t_press"] = time.monotonic()
         pid, name = frontmost_info()
         self.state["target_pid"], self.state["target_name"] = pid, name
         log("按键", "开始录音")
-        threading.Thread(target=self.handle_utterance, args=(stop_ev,), daemon=True).start()
+        threading.Thread(target=self.handle_utterance, args=(stop_ev), daemon=True).start()
 
     @objc.python_method
     def on_conn(self, connected: bool, reason: str = "", power_off: bool = False,
@@ -627,15 +628,13 @@ class TrayApp(Foundation.NSObject):
         self.current_stop[0].set()
         self.state["t_release"] = time.monotonic()
         self.current_stop = None
-        self.set_state(phase=PHASE_PROC, preview="")   # 松手即切「上屏中」，覆盖关流+转写+注入整段
+        self.set_state(phase=PHASE_PROC)   # 松手即切「处理中」，覆盖关流+转写+注入整段
         log("按键", f"{why} → 上屏中…")
 
     @objc.python_method
     def handle_utterance(self, stop_ev: threading.Event) -> None:
         cap = Recorder(self.decoder, self.audio_device,
-                       on_preview=lambda t: self.set_state(preview=t, result_ts=time.monotonic()),
-                       on_level=lambda rms: self.pill.set_level(rms),      # 悬浮条波形
-                       is_busy=lambda: self.get_state().get("inflight", 0) > 0)
+                       on_level=lambda rms: self.pill.set_level(rms))   # 悬浮条波形
         try:
             cap.start()
         except Exception as e1:
@@ -655,9 +654,7 @@ class TrayApp(Foundation.NSObject):
                 pass
             try:
                 cap = Recorder(self.decoder, self.audio_device,
-                               on_preview=lambda t: self.set_state(preview=t, result_ts=time.monotonic()),
-                               on_level=lambda rms: self.pill.set_level(rms),
-                               is_busy=lambda: self.get_state().get("inflight", 0) > 0)
+                               on_level=lambda rms: self.pill.set_level(rms))
                 cap.start()
             except Exception as e2:
                 # 这次录音录不成，但不代表软件坏了：回空闲 + 提示几秒，下次按键会重新枚举设备再试。
@@ -712,7 +709,7 @@ class TrayApp(Foundation.NSObject):
     def _finish_utterance(self, cap, samples, t_release, t_rec_stop, cancelled: bool = False) -> None:
         # 取消状态必须在外面读、传进来：caller 已经 clear 了 cancel_event，在这里再读永远是 False
         if cancelled:
-            self.set_state(phase=PHASE_IDLE, preview="")
+            self.set_state(phase=PHASE_IDLE)
             return
         dur = len(samples) / SAMPLE_RATE
         hold_ms = (t_release - self.get_state().get("t_press", t_release)) * 1000
@@ -723,7 +720,7 @@ class TrayApp(Foundation.NSObject):
                     f"像说话的时长 {sp_sec:.2f}s（峰值 {sp_peak:.4f}）")
         if dur < self.min_audio_s:            # 太短：不送模型，免得被脑补出「嗯」这类填充词
             log("忽略", f"只录到 {dur:.2f}s（< {self.min_audio_s:.2f}s），这次丢掉")
-            self.set_state(phase=PHASE_IDLE, last_text="", preview="",
+            self.set_state(phase=PHASE_IDLE, last_text="",
                            injected=f"未上屏：只录到 {dur:.2f}s（太短，已忽略）",
                            result_ts=time.monotonic())
             return
@@ -732,7 +729,7 @@ class TrayApp(Foundation.NSObject):
             # 判据见 audio.has_speech：自适应底噪 + 像说话的总时长 + 峰值。
             log("忽略", f"没检测到说话（像说话的时长 {sp_sec:.2f}s < {SPEECH_MIN_SEC}s "
                         f"或峰值 {sp_peak:.4f} < {SPEECH_MIN_PEAK}），这次丢掉")
-            self.set_state(phase=PHASE_IDLE, last_text="", preview="",
+            self.set_state(phase=PHASE_IDLE, last_text="",
                            injected=f"未上屏：没听到说话（{sp_sec:.1f}s 有效语音）",
                            result_ts=time.monotonic())
             return
@@ -741,7 +738,7 @@ class TrayApp(Foundation.NSObject):
         ms = (t_decoded - t_rec_stop) * 1000
         if not text:
             log("结果", f"（{dur:.1f}s 没听清）")
-            self.set_state(phase=PHASE_IDLE, last_text="", preview="")
+            self.set_state(phase=PHASE_IDLE, last_text="")
             self._set_linger("没听清", AppKit.NSColor.systemYellowColor())
             return
         if self.injector.last_newlines:
@@ -759,7 +756,7 @@ class TrayApp(Foundation.NSObject):
             if reactivate(pid):
                 log("焦点", f"中途切到了「{cur_name}」，已把「{self.state.get('target_name')}」拉回前台再上屏")
             else:
-                self.set_state(phase=PHASE_IDLE, last_text=text, preview="",
+                self.set_state(phase=PHASE_IDLE, last_text=text,
                                injected=f"未上屏：目标是「{self.state.get('target_name')}」，"
                                         f"但你切到了「{cur_name}」且拉不回来")
                 log("输出", self.state["injected"])
@@ -770,11 +767,11 @@ class TrayApp(Foundation.NSObject):
             injected = f"未上屏：注入异常 {e}"
         log("输出", f"{injected}   [松手→停录 {(t_rec_stop - t_release) * 1000:.0f}ms"
                     f"（关流 {cap.stream_stop_ms:.0f}+{cap.stream_close_ms:.0f}ms"
-                    f"，等预览 {cap.preview_wait_ms:.0f}ms，上次预览 {cap.last_preview_ms:.0f}ms）"
+                    f"）"
                     f"+ 解码 {ms:.0f}ms"
                     f" + 上屏 {self.injector.ax_ms + self.injector.type_ms:.0f}ms"
                     f" = 松手→完成 {(time.monotonic() - t_release) * 1000:.0f}ms]")
-        self.set_state(phase=PHASE_IDLE, last_text=text, preview="", injected=injected,
+        self.set_state(phase=PHASE_IDLE, last_text=text, injected=injected,
                        result_ts=time.monotonic())
         # 上屏中→空闲：别直接跳没了，先把「空闲」亮一下再淡出（用户要求）
         self._set_linger("空闲", AppKit.NSColor.whiteColor())
@@ -821,7 +818,7 @@ class TrayApp(Foundation.NSObject):
         mic = {True: "已授权", False: "未授权（去授权）", None: "检查中"}[st["mic_ok"]]
         post = {True: "已授权", False: "未授权（现在写不进输入框）", None: "检查中"}[st["post_ok"]]
         self.mi_status.setTitle_(f"{glyph} {label} · 设备{conn} · {st['device_info']}")
-        self.mi_preview.setTitle_("最近结果：" + (st["last_text"] or st["preview"] or "（无）")[:52])
+        self.mi_preview.setTitle_("最近结果：" + (st["last_text"] or "（无）")[:52])
         if st["injected"]:
             self.mi_preview.setTitle_(self.mi_preview.title() + "   · " + st["injected"][:30])
         self.mi_copy.setEnabled_(bool(st["last_text"]))
@@ -871,15 +868,16 @@ class TrayApp(Foundation.NSObject):
                 lead, color = Pill.LEAD_WAVE, RED
                 # 不在这里截断：能放多少行由 pill 按实际行高决定（放不下就显示最近的尾巴），
                 # 以前这里硬切 [:60]（正好两行），长语音说到两行就再也不长了。
-                detail = (st["preview"] or None)
             elif st["connected"] is None:
                 # 句柄拿到了但设备还没证明自己能发按键：这时候提示不能消失，
                 # 否则用户以为能用了，按下去却什么都没发生（见 _device_ready）
                 text, color = "设备连接中…", YELLOW
             elif phase == PHASE_PROC:
-                # 上屏中不再重复显示转写文本（用户要求）：缩小成一个小条「上屏中」就够了。
-                # 呼吸是这一档唯一的动效，pulse=True 才让 pill 的 30fps 定时器开着。
+                # 处理中（关流 + 等预览 + 最终解码 + 上屏，整段都算）：把文字留着，别让框空着。
+                # 最终文字一解出来就换成它——用户要的是「上屏之前先看见完整的那句」，
+                # 而听写时的预览是每 0.8 秒刷一次的，松手那一刻最多差着 0.8 秒的内容。
                 color, pulse = BLUE, True
+                detail = (st["reason"].partition("：")[2].strip() or None)   # 失败原因写全
             elif st["paused"]:
                 color = YELLOW
             elif st["connected"] is False:
@@ -919,6 +917,11 @@ class TrayApp(Foundation.NSObject):
 
     @objc.python_method
     def set_icon(self, name: str, tint) -> None:
+        # tick 每 0.12 秒调一次，而状态大多数时候没变。实测每建一次 SF Symbol 图片要 0.027ms，
+        # 什么都不判就重建 = 白白吃掉一个核的 ~22%。所以状态没变就什么都不做。
+        if self._icon_key == (name, tint):
+            return
+        self._icon_key = (name, tint)
         img = self.symbol(name)
         if img is None:
             self.button.setTitle_("OS")     # 极端情况退回文字，至少看得见
