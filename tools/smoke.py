@@ -44,6 +44,38 @@ def imports_ok() -> str:
 
 
 
+def pipeline_decoder_source() -> str:
+    """pipeline 的解码器必须是「用时现取」，不能自己存一份。
+
+    真踩过：构造 SpeakingPipeline 时传 decoder=None 打算「模型加载完再补」，结果忘了补，
+    于是模型明明加载成功，一说完整句就 AttributeError（炸在子线程里，用户只看到「处理中」卡住）。
+    现在要求 provider 形式，并就地把「provider 返回 None 时必须明确报错」验一遍。
+    """
+    import numpy as np
+    from voxkey.pipeline import PipelineConfig, SpeakingPipeline
+
+    class Inj:
+        last_newlines = 0
+        def inject(self, t): return "已上屏"
+
+    calls = {"n": 0}
+
+    def provider():
+        calls["n"] += 1
+        return None          # 模拟模型还没加载完
+
+    p = SpeakingPipeline(get_decoder=provider, config=PipelineConfig(0.5), injector=Inj())
+    try:
+        p.transcribe(np.zeros(16000, dtype="float32"))
+    except RuntimeError as e:
+        if "模型" not in str(e):
+            raise AssertionError(f"报错信息看不懂：{e}")
+        return f"provider 形式且空解码器会明确报错（调用了 {calls['n']} 次）"
+    except AttributeError as e:
+        raise AssertionError(f"还是 AttributeError 的老毛病：{e}")
+    raise AssertionError("空解码器居然没报错")
+
+
 def structure_rules() -> str:
     """静态结构约定（扫源码，不连设备）：
 
@@ -465,6 +497,7 @@ def main() -> int:
     ok = True
     ok &= check("包导入", imports_ok)
     ok &= check("结构约定（线程 args/元组）", structure_rules)
+    ok &= check("pipeline 解码器现取", pipeline_decoder_source)
     ok &= check("按键回调异常不杀线程", key_callback_survives)
     ok &= check("悬浮条几何断言", pill_geometry)
     ok &= check("长语音预览裁剪", pill_long_preview)

@@ -180,7 +180,7 @@ class TrayApp(Foundation.NSObject):
         self.injector = Injector(newline_mode=args.newline)   # 只走不碰剪贴板的两条路
         from voxkey.pipeline import SpeakingPipeline, PipelineConfig
         self.pipeline = SpeakingPipeline(
-            decoder=None,   # 模型加载完成后在 load_model 里补上
+            get_decoder=lambda: self.decoder,   # 用时现取，避免和 self.decoder 两份引用不同步
             config=PipelineConfig(min_audio_s=args.min_audio_s, device_hint=args.device,
                                   newline_mode=args.newline),
             injector=self.injector,

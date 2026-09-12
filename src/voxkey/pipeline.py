@@ -55,16 +55,18 @@ class PipelineConfig:
 class SpeakingPipeline:
     """一次「按住说话」的完整业务。与 UI 解耦：进度靠回调，结果靠返回值。"""
 
-    def __init__(self, decoder, config: PipelineConfig, injector,
+    def __init__(self, get_decoder, config: PipelineConfig, injector,
                  on_level=None, device_hint: str = "AU05",
                  archive_dir: str | None = None, on_archive=None):
         """
-        decoder      共享的 Decoder（内部有锁，串行）
+        get_decoder  () -> Decoder | None：**每次用时现取**。模型是启动后异步加载的，
+        这里如果存一份引用，就变成两个地方各有一个 decoder，迟早不同步——真踩过：
+        构造时传 None 忘了补，一说完整句就 AttributeError。
         injector     voxkey.inject.Injector
         on_level     每个音频块的实时 RMS 回调（喂悬浮条波形），在音频线程里调
         archive_dir  非 None 时把每句话存成 wav（调 ASR 用），on_archive(wav路径, 摘要dict)
         """
-        self.decoder = decoder
+        self.get_decoder = get_decoder
         self.cfg = config
         self.injector = injector
         self.on_level = on_level
@@ -83,7 +85,7 @@ class SpeakingPipeline:
         半开的那条流会在这里显式关掉：sounddevice 的 Stream 没有 __del__，
         GC 不会替你关，一直占着输入设备会让第二次 start 更容易失败。
         """
-        cap = Recorder(self.decoder, self.audio_device, on_level=self.on_level)
+        cap = Recorder(self.get_decoder(), self.audio_device, on_level=self.on_level)
         err = self._open(cap)
         if err is None:
             return cap, None
@@ -96,7 +98,7 @@ class SpeakingPipeline:
             cap.stop()
         except Exception:
             pass
-        cap2 = Recorder(self.decoder, self.audio_device, on_level=self.on_level)
+        cap2 = Recorder(self.get_decoder(), self.audio_device, on_level=self.on_level)
         err2 = self._open(cap2)
         return cap2, err2
 
@@ -125,8 +127,11 @@ class SpeakingPipeline:
         return ""
 
     def transcribe(self, samples: np.ndarray) -> tuple[str, float]:
+        decoder = self.get_decoder()
+        if decoder is None:
+            raise RuntimeError("模型还没加载完就用它解码了")
         t0 = time.perf_counter()
-        text = self.decoder.decode(samples)
+        text = decoder.decode(samples)
         return text, (time.perf_counter() - t0) * 1000
 
     def inject(self, text: str) -> tuple[str, float]:
