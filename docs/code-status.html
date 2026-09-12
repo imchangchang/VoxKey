@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxKey 代码现状</title>
+<style>
+  :root{--bg:#14161a;--panel:#1c1f26;--line:#2b3038;--fg:#e6e8ec;--dim:#9aa3b2;--accent:#6aa9ff;--ok:#57d38c;--warn:#ffb454;--bad:#ff6b6b;--code:#101216}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.75 -apple-system,"PingFang SC","Helvetica Neue",Arial,sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:40px 24px 96px}
+  h1{font-size:26px;margin:0 0 6px}
+  h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h3{font-size:15.5px;margin:22px 0 8px;color:#cfd6e2}
+  p,li{color:#d3d8e0}
+  code{background:var(--code);padding:1px 6px;border-radius:4px;font:13px/1.5 ui-monospace,Menlo,monospace;color:#e9d7a8}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:14px 16px;overflow-x:auto;font:13px/1.6 ui-monospace,Menlo,monospace}
+  pre code{background:none;padding:0;color:#d7dde6}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#20242c;color:#cfd6e2}
+  tr:nth-child(even) td{background:#191c22}
+  .sub{color:var(--dim);font-size:14px}
+  .meta{color:var(--dim);font-size:13px}
+  .callout{border-left:3px solid var(--warn);background:rgba(255,180,84,.07);padding:10px 14px;border-radius:0 8px 8px 0;margin:14px 0}
+  .callout.bad{border-color:var(--bad);background:rgba(255,107,107,.07)}
+  .toc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 18px}
+  .toc a{color:var(--accent);text-decoration:none}
+  .yes{color:var(--ok)} .no{color:var(--dim)}
+  .num{color:var(--warn);font-weight:600}
+  hr{border:none;border-top:1px solid var(--line);margin:32px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>VoxKey 代码现状</h1>
+<p class="sub">按住语音键说话 → 松手 → 文字打进光标。macOS 常驻，Python + PyObjC + sherpa-onnx。生成于 2026-09-11。</p>
+
+<div class="toc"><b>目录</b>
+<ol>
+<li><a href="#flow">一句话说清整个程序</a></li>
+<li><a href="#mod">模块与行数</a></li>
+<li><a href="#each">每个模块现在是什么样</a></li>
+<li><a href="#perf">性能现状（实测数字）</a></li>
+<li><a href="#issues">已知问题 / 没做的事</a></li>
+<li><a href="#ops">怎么跑、怎么验、日志在哪</a></li>
+</ol>
+</div>
+
+<h2 id="flow">1. 一句话说清整个程序</h2>
+<p>按键报文从 HID 进来，录音从麦克风进来，两路汇到主程序；主程序起线程录音，边录边把预览文字甩给悬浮条；松手后把整段音频喂给离线模型，解出文字，用 AX 或合成按键打进光标。</p>
+<pre><code>设备(接收器) ─┬─ HID 键盘集合 ──→ DeviceKeyReader(线程) ──→ on_key_state()      按键/松手/取消
+              └─ UAC 麦克风 ────→ Recorder(sounddevice 回调) ──→ chunks 队列     音频块
+                                      │ 每 0.8s 踢一次预览(线程)
+                                      ▼
+                                 Decoder(funasr-nano, 加锁串行)
+                                      │ 松手
+                                      ▼
+            handle_utterance(线程)：停流 → 判「有没有说话」→ 解出全文 → Injector → 打进光标
+                                      │
+                                      ▼
+            tick_(NSTimer 0.12s)：状态机 → 悬浮条(pill) / 菜单栏图标 / 收场提示</code></pre>
+<p>线程一共 5 类：主线程（AppKit）、按键读取线程、录音回调线程（PortAudio）、预览解码线程、每次说话一个的 utterance 线程。共享状态全部走 <code>self.state</code> + <code>state_lock</code>，模型访问走 <code>Decoder._lock</code>。</p>
+
+<h2 id="mod">2. 模块与行数</h2>
+<table>
+<thead><tr><th>文件</th><th>行数</th><th>干什么</th><th>依赖</th></tr></thead>
+<tbody>
+<tr><td class="mono">app.py</td><td>1220</td><td>常驻主程序：按键状态机、说话全流程、悬浮条/菜单刷新、设备看守、权限、单实例锁</td><td>所有模块 + AppKit</td></tr>
+<tr><td class="mono">pill.py</td><td>653</td><td>悬浮状态条：固定窗口 + CALayer 弹簧 + 裁剪层 + 角标 + 收场提示</td><td>AppKit/Quartz</td></tr>
+<tr><td class="mono">inject.py</td><td>359</td><td>上屏：AX 直写（带回读校验）→ 合成 Unicode 按键；不碰剪贴板</td><td>ApplicationServices</td></tr>
+<tr><td class="mono">audio.py</td><td>272</td><td>采集：找设备、100ms 收块、说话检测、预览、录音期间定稿满段</td><td>sounddevice/numpy</td></tr>
+<tr><td class="mono">transcribe.py</td><td>115</td><td>推理封装：模型加锁串行、按停顿切段、退化文本检测</td><td>sherpa_onnx/numpy</td></tr>
+<tr><td class="mono">models.py</td><td>122</td><td>模型注册表与加载（默认 funasr-nano-int8，目录可换）</td><td>sherpa_onnx</td></tr>
+<tr><td class="mono">device/protocol.py</td><td>230</td><td>厂商通道：帧格式、TEA 加解密、12 条命令表、键位表</td><td>无</td></tr>
+<tr><td class="mono">device/device.py</td><td>158</td><td>厂商通道传输层 VibeKey：request/collect/listen + 版本/电量/SN/键位/待机</td><td>hid</td></tr>
+<tr><td class="mono">device/keyreader.py</td><td>121</td><td>键盘集合读取：报文解析、键码、掉线自愈</td><td>hid</td></tr>
+<tr><td class="mono">device/monitor.py</td><td>192</td><td>诊断 CLI：边按边看按键和转写</td><td>本包 + 上层</td></tr>
+<tr><td class="mono">tools/ptt_demo.py</td><td>344</td><td>命令行 demo（剪贴板上屏），验证硬件链路用</td><td>包 + pyperclip/pynput</td></tr>
+<tr><td class="mono">tools/device_probe.py</td><td>177</td><td>设备探针：读信息、改键位、发原始命令</td><td>包</td></tr>
+<tr><td class="mono">tools/smoke.py</td><td>423</td><td>自检：16 项断言，不连设备、不要权限</td><td>包</td></tr>
+<tr><td class="mono">tools/verify/</td><td>219</td><td>模型质量对比：CER / 首字延迟 / RTF（语料用 say 现场生成）</td><td>包</td></tr>
+</tbody>
+</table>
+<p class="meta">合计约 4600 行（不含模型与生成文件）。依赖 6 个第三方包，全部在 pyproject 里。</p>
+
+<h2 id="each">3. 每个模块现在是什么样</h2>
+
+<h3>app.py —— 主程序（1220 行，最大的一个）</h3>
+<p>三个职责，都在一个类（TrayApp）和一个看守线程（KeySupervisor）里：</p>
+<table>
+<thead><tr><th>职责</th><th>入口</th><th>现状</th></tr></thead>
+<tbody>
+<tr><td>按键状态机</td><td class="mono">on_key_state()</td><td>按下起录、松手出字、取消键丢弃；确认/取消两键转发给系统（因为键盘集合被我们独占，不转发系统就收不到）</td></tr>
+<tr><td>说话全流程</td><td class="mono">handle_utterance()</td><td>录音前重新解析麦克风（插拔后编号会变，变了就重枚举 PortAudio）→ 松手后停流 → 存档 → <b>说话检测</b> → 解码 → 上屏 → 收场提示</td></tr>
+<tr><td>设备看守</td><td class="mono">KeySupervisor</td><td>每 2 秒查一次接收器：拔了报「未连接」、插回来自动重开句柄并<b>等设备应答</b>（插回后约 3.6 秒内设备不发报文）；每 3 秒问一次厂商通道判断「待机/关机」；每 2 秒复查权限</td></tr>
+<tr><td>UI 刷新</td><td class="mono">tick_()</td><td>NSTimer 0.12s：算状态 → 悬浮条显隐/文字/角标 → 菜单文案 → 收场提示倒计时 → 淡出</td></tr>
+</tbody>
+</table>
+<p><b>悬浮条显隐规则</b>（<code>pill_wanted()</code>，纯函数，可断言）：听写中/处理中、设备没连接或还在探测、暂停、权限缺失、刚上屏失败 3 秒内、<b>充电中</b> → 显示；其余收起。</p>
+<p><b>收场提示</b>（<code>_set_linger</code>）：消失前先亮 1.2 秒收场文字再淡出——上屏完成→「空闲」白、设备开机→「已开机」绿、连上→「已连接」绿、恢复监听→「已恢复监听」绿、没听清→「没听清」黄。</p>
+<p><b>已知不干净的地方</b>：TrayApp 一个类干了太多事（1200 行里 60 个方法），状态机、UI、设备探测混在一起；<code>device_off</code> 的判定依赖字符串原因；菜单文案每 tick 无条件重设（已测 ~0.3ms/s，小）。</p>
+
+<h3>pill.py —— 悬浮条（653 行）</h3>
+<p>架构（照开源刘海应用学的）：窗口建一次就不再动（580×172），胶囊是 CALayer，尺寸/位置用 CASpringAnimation 在系统渲染服务里插值，Python 主线程只在状态变化时设一次目标值。</p>
+<table>
+<thead><tr><th>机制</th><th>现状</th></tr></thead>
+<tbody>
+<tr><td>布局</td><td>状态行（居中）+ 内容行（听写预览，最多 6 行，超长保留最近说的并加省略号）。左右角标（左固件版本、右电量/电压）两边对称留宽，中间状态组才是真居中</td></tr>
+<tr><td>裁剪</td><td>胶囊阴影层 + <code>masksToBounds</code> 裁剪层两层结构；内容用中心锚点定位，弹簧参数与胶囊一致，所以内容永远在框内、屏幕位置不动</td></tr>
+<tr><td>显隐</td><td>显示 = orderFront + 重置 alpha；收起 = 0.28s 淡出（带代号防串台，淡出中途 show 不会被老回调收掉）；隐藏期间不建 30fps 定时器</td></tr>
+<tr><td>省电</td><td>30fps 定时器只在「有波形」或「呼吸态」时开；空闲必停（曾因拿常量当状态判断导致永不停，修过）</td></tr>
+<tr><td>测量缓存</td><td>文字宽度按（字号,文本,可用宽）缓存，超过 96 条整体清空</td></tr>
+</tbody>
+</table>
+
+<h3>inject.py —— 上屏（359 行）</h3>
+<p>两级，都不碰剪贴板：</p>
+<ol>
+<li><b>AX 直写</b>：写焦点控件的 <code>kAXSelectedText</code>，<b>回读校验</b>，写完 text 必须出现在新值里才算成功。已知不支持的 App（终端系、Electron/Chromium 系，按 bundle id 列表）直接跳过。</li>
+<li><b>合成 Unicode 按键</b>：按 UTF-16 切 16 字符块（代理对不切开、块首不接换行），块间 8ms、尾部 25ms；需要「辅助功能」的合成按键权限。</li>
+</ol>
+<p>松手前会把之前切走的前台 App 拉回来（防止字打进别的窗口）；密码框 / Secure Input 期间直接拒绝并说明。</p>
+
+<h3>audio.py —— 采集（272 行）</h3>
+<ul>
+<li>100ms 一块，PortAudio 回调里只入队 + 算 RMS。</li>
+<li><b>说话检测</b>（<code>has_speech</code>）：先用 1/10 分位估这段音频自己的底噪，再数高于底噪 3 倍的 20ms 帧总时长。门槛：有效语音 ≥ 0.35s 且峰值 ≥ 0.03。预览和最终解码都过这道闸——没听到人说话就不喂模型，否则它会脑补出「嗯。」。阈值是拿 100 多条真实按键录音标定的。</li>
+<li><b>预览自己滚动提交</b>：每攒够 6 秒把这段解出来接进预览文本，尾巴窗口只覆盖没提交的部分（8 秒）。每轮重解代价从 20 秒降到几秒，预览跟得上说话。间隔按上一轮实测耗时自适应（×1.25，上限 3 秒）。代价：预览文字与最终文字差 4.7%（切分粒度不同）。</li>
+<li>录音期间就定稿满段（22 秒一段，切点挑停顿）：松手后只解剩下那段。实测 44 秒语音松手后解码 3176ms → 218ms。</li>
+<li>麦克风插拔后 PortAudio 设备表是旧的，要 <code>_terminate/_initialize</code> 重新枚举，否则拿旧编号去开会报 -10851/-9986。</li>
+</ul>
+
+<h3>transcribe.py + models.py —— 推理（237 行）</h3>
+<ul>
+<li>recognizer <b>不能并发</b>（并发会 malloc abort），Decoder 全程加锁。</li>
+<li>模型上下文 512 token ≈ 28 秒，长音频按 22 秒切段、切点挑能量最低处（不停在字中间）。</li>
+<li>默认模型 funasr-nano-int8（972MB，含 Qwen3-0.6B tokenizer）；注册表里还有 sensevoice、zipformer×2、paraformer 用于质量对比。</li>
+<li>解码速度实测约 <b>14 倍实时</b>（4s→287ms，20s→1464ms），线性于音频长度。</li>
+<li>模型缺失/名字错抛 <code>ModelNotAvailable</code>（不能用 sys.exit——那会绕过后台线程的 except）。</li>
+</ul>
+
+<h3>device/ —— 设备层（701 行）</h3>
+<p>接收器在 USB 上是复合设备：接口 2 是标准 HID（report 3 键盘），接口 3 是厂商私有通道（usage page 0xFFFC、report 0x55、63 字节、TEA-32 轮加密、密钥全局固定）。</p>
+<ul>
+<li><b>keyreader</b>：读键盘报文（9 字节 = report id + 修饰位 + 6 个键码）。语音键原生 0x0b；掉线（拔接收器）hidapi 会抛 OSError，现在会记下原因并让看守重开句柄。</li>
+<li><b>device/protocol</b>：12 条命令（版本/电量/SN/UUID/麦克风开关/键位/固定功能/钩子模式/待机时间/指示灯/心跳）。电量响应 59 字节，电压 u16le@0、百分比@2（10% 一档的粗表）、充电标志@6。</li>
+<li><b>device</b>：传输层。响应靠 b0 最高位 + b1/b2 回显匹配；分片类命令收 0.6 秒窗口拼帧；待机时间实测 <b>300 秒</b>。</li>
+<li><b>电源状态</b>：厂商通道不应答 = 待机或关机（<b>区分不了</b>，连发 heartbeat 也叫不醒）；只有接收器拔掉能确定性判定（HID 枚举直接没了）。</li>
+</ul>
+
+<h3>tools/ —— 工具（1163 行）</h3>
+<p><code>smoke.py</code> 16 项自检（包导入、悬浮条几何、长预览裁剪、显隐规则、收场提示规则、说话检测闸门、淡出、角标、模型、4 个 CLI --help），<b>不连设备、不要权限</b>，改完代码必须跑。<code>device_probe.py</code> 读写键位、发原始命令。<code>verify/</code> 用 say 生成的语料对比候选模型的 CER/延迟。</p>
+
+<h2 id="perf">4. 性能现状（实测数字）</h2>
+<table>
+<thead><tr><th>环节</th><th>实测</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>模型解码速度</td><td class="num">14 倍实时</td><td>4s→287ms、8s→597ms、20s→1464ms、22s→1793ms，线性于音频长度</td></tr>
+<tr><td>松手→出字（2.6s 语音）</td><td class="num">577ms</td><td>停录 292 + 解码 207 + 上屏 53</td></tr>
+<tr><td>松手→出字（44s 语音）</td><td class="num">218ms 解码</td><td>靠录音期间定稿（否则 3176ms）</td></tr>
+<tr><td>松手→出字（48s 语音）</td><td class="num">2387ms 解码</td><td>机器负载高时会数倍恶化（load 12 时同段音频 0.54s→3.44s）</td></tr>
+<tr><td>模型加载</td><td class="num">2~4s</td><td>启动时一次，后台线程加载</td></tr>
+<tr><td>内存常驻</td><td class="num">~1GB+</td><td>funasr-nano 972MB + 解释器/依赖；这是超 S4 目标的主因（issue #14）</td></tr>
+<tr><td>悬浮条动画</td><td>60fps 不掉帧</td><td>弹簧在系统渲染服务插值，Python 不参与帧；空闲时 30fps 定时器停掉</td></tr>
+<tr><td>tick 常驻开销</td><td>图标重建 ≈ 22% 一核</td><td>已改成状态不变就跳过；菜单文案 ~0.3ms/s（可忽略）</td></tr>
+<tr><td>预览一轮固定开销</td><td>0.7ms</td><td>numpy 拼接 + 说话检测扫描，可忽略（大头是模型解码）</td></tr>
+<tr><td>厂商通道探测</td><td>每 3 秒一次</td><td>在线时 30ms/次；可能一直把设备吵醒（待机永远到不了点），可用 VOXKEY_NO_DEVICE_PROBE=1 关掉</td></tr>
+</tbody>
+</table>
+
+<h2 id="issues">5. 已知问题 / 没做的事</h2>
+<table>
+<thead><tr><th>问题</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td>待机和真关机<b>无法区分</b>：现象完全一样（HID 在、键盘集合能开、AU05 在、厂商通道沉默、心跳叫不醒）</td><td>提示合并为「设备待机/关机中」；按键报文一到就自动翻回在线</td></tr>
+<tr><td>待机时<b>第一次按键被设备吞掉</b>（要按第二次才生效）</td><td>固件行为，软件侧无解；悬浮条提示让用户知道要按两下</td></tr>
+<tr><td>预览文字与最终文字<b>差 4.7%</b>（切分粒度不同，用户已接受）</td><td>要消除只能换流式模型做预览（+531MB 内存）或接受更慢的刷新</td></tr>
+<tr><td>预览更新间隔随音频变长退化（0.8s → 1.5~3s，负载高时更慢）</td><td>已做自适应间隔；根治要流式模型或更快的离线模型</td></tr>
+<tr><td>远程桌面/虚拟机丢 Unicode 载荷（会打出一串 a）；密码框/Secure Input 期间注入无效</td><td>平台限制，软件层无解，只能拒绝并提示</td></tr>
+<tr><td>只支持主屏（副屏拖动会被拉回、文字缩放取主屏）</td><td>未做</td></tr>
+<tr><td>单实例锁在临时目录；还没打包 .app（权限归属、开机自启、签名公证）</td><td>未做，打包时一起处理</td></tr>
+<tr><td>模型常驻 ~1GB，超目标</td><td>issue #14 待拍板（候选：换更小模型/闲时卸载）</td></tr>
+<tr><td>TrayApp 1200 行、60 个方法，状态机/UI/设备探测混在一个类里</td><td>能跑但难改；若上 Rust 自然重划</td></tr>
+</tbody>
+</table>
+
+<h2 id="ops">6. 怎么跑、怎么验、日志在哪</h2>
+<pre><code>python3.12 -m venv .venv && .venv/bin/pip install -e '.[tools]'
+PYTHONPATH=src .venv/bin/python -m voxkey.app          # 常驻
+PYTHONPATH=src .venv/bin/python tools/smoke.py         # 自检（16 项，不连设备）</code></pre>
+<ul>
+<li>模型放 <code>models/</code>（972MB，gitignore），或 <code>VOXKEY_MODELS_DIR</code> 指别处。</li>
+<li>日志：常驻程序 stdout 重定向到 <code>voxkey.log</code>（仓库根目录，已 gitignore——<b>别再放 /tmp</b>，被系统清过一次）。</li>
+<li>权限三样：麦克风、辅助功能（合成按键 + AX）、输入监控（读设备按键）。脚本形态权限记在启动它的终端头上。</li>
+<li>按键上报的原始报文：<code>--debug-keys</code>；录音存档：<code>--save-audio 目录</code>（wav + index.jsonl，带时长/RMS/峰值）。</li>
+<li>设备协议细节（厂商通道、命令表、键位表、实测坑）另见 <code>docs/au05-protocol.html</code>。</li>
+</ul>
+
+<hr>
+<p class="meta">数字都能在提交记录和运行日志里找到对应证据。没有写「待优化」却没数据支撑的条目。</p>
+
+</div>
+</body>
+</html>
