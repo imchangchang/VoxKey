@@ -17,6 +17,8 @@ from typing import Callable
 
 import hid
 
+from voxkey.logging import log
+
 VENDOR_ID = 0xFFF1
 PRODUCT_ID = 0x00DD
 KEYBOARD_REPORT_ID = 0x03
@@ -98,7 +100,14 @@ class DeviceKeyReader:
             state = (mods, tuple(keys))
             if state != last:  # 设备会重复发同样的报文，去重
                 last = state
-                self.on_state(mods, keys)
+                try:
+                    self.on_state(mods, keys)
+                except Exception as e:
+                    # 回调（主程序的按键处理）里抛异常不能把读线程带走：曾经因为回调里一个
+                    # 类型错误，线程就这么死了，表现是「按一下之后设备再也读不到」，
+                    # 日志里只有一句「按键读取中断」，完全看不出是回调的锅。
+                    self.error = e
+                    log("按键", f"按键回调抛异常（跳过这次，线程继续跑）：{type(e).__name__}: {e}")
 
     def stop(self) -> None:
         self._stop.set()

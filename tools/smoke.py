@@ -43,6 +43,72 @@ def imports_ok() -> str:
     return ""
 
 
+
+def structure_rules() -> str:
+    """静态结构约定（扫源码，不连设备）：
+
+    1) `threading.Thread(args=(x))` 漏掉尾逗号 = args 不是元组。Thread 自己不校验，
+       等 start 时才在子线程里炸，静默失效；
+    2) `self.current_stop = (x)` 同理（它本该是单元素元组）。
+    这两条都是真踩过的：一次用正则清悬空逗号时把 `(stop_ev,)` 改成了 `(stop_ev)`，
+    整个听写功能失效，而且炸在子线程里、日志只留下一句「按键读取中断」，很难看出真因。
+    用正则而不是 AST，因为 AST 里 `(x)` 和 `x` 是同一个节点，分不出来。
+    """
+    import re
+    import pathlib as _p
+
+    root = _p.Path(__file__).resolve().parents[1] / "src" / "voxkey"
+    rules = [
+        (r"args=\(\s*[A-Za-z_][\w.]*\s*\)", "Thread(args=) 是单个名字且没尾逗号，不是元组"),
+        (r"current_stop\s*=\s*\(\s*[A-Za-z_][\w.]*\s*\)",
+         "current_stop 赋成了非元组（漏了尾逗号）"),
+    ]
+    fails = []
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text()
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for pat, msg in rules:
+                if re.search(pat, line):
+                    fails.append(f"{path.name}:{lineno} {msg}")
+    if fails:
+        raise AssertionError("；".join(fails))
+    return f"{len(rules)} 条结构约定都还在"
+
+
+def key_callback_survives() -> str:
+    """按键回调抛异常时，读线程必须继续活着（曾经回调里的类型错误把线程搞死了）。"""
+    import threading
+    from voxkey.device.keyreader import DeviceKeyReader, parse_report
+
+    calls = {"n": 0}
+
+    def boom(mods, keys):
+        calls["n"] += 1
+        raise TypeError("模拟回调里的类型错误")
+
+    r = DeviceKeyReader(boom)
+
+    class FakeDev:
+        def read(self, n):
+            # report id 3 + 修饰位 + 保留 + 语音键
+            return bytes([3, 0x08, 0, 0x0B, 0, 0, 0, 0, 0])
+
+    r._dev = FakeDev()
+    r._thread = threading.Thread(target=r._loop, daemon=True)
+    r._thread.start()
+    time.sleep(0.15)
+    alive = r.is_alive()
+    r._stop.set()
+    r._thread.join(timeout=1)
+    if calls["n"] == 0:
+        raise AssertionError("回调根本没被调用（假报文没走通）")
+    if not alive:
+        raise AssertionError("回调抛异常把读线程带走了")
+    if r.error is None:
+        raise AssertionError("回调异常没被记下来")
+    return f"回调抛了 {calls['n']} 次异常，线程仍活着"
+
+
 def pill_geometry() -> str:
     """四种状态下：文字/波形都在裁剪层内；无符号时文字居中偏差 0pt，有波形时整组居中 <5pt。"""
     import AppKit
@@ -398,6 +464,8 @@ def main() -> int:
 
     ok = True
     ok &= check("包导入", imports_ok)
+    ok &= check("结构约定（线程 args/元组）", structure_rules)
+    ok &= check("按键回调异常不杀线程", key_callback_survives)
     ok &= check("悬浮条几何断言", pill_geometry)
     ok &= check("长语音预览裁剪", pill_long_preview)
     ok &= check("悬浮条显示规则", pill_wanted_table)

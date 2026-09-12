@@ -350,14 +350,14 @@ class TrayApp(Foundation.NSObject):
             return
         self._resolve_audio_device()
         stop_ev = threading.Event()
-        self.current_stop = (stop_ev)
+        self.current_stop = (stop_ev,)
         self.cancel_event.clear()
         self.set_state(phase=PHASE_REC, reason="")
         self.state["t_press"] = time.monotonic()
         pid, name = frontmost_info()
         self.state["target_pid"], self.state["target_name"] = pid, name
         log("按键", "开始录音")
-        threading.Thread(target=self.handle_utterance, args=(stop_ev), daemon=True).start()
+        threading.Thread(target=self.handle_utterance, args=(stop_ev,), daemon=True).start()
 
     @objc.python_method
     def on_device_state(self, state: DeviceState, reason: str = "") -> None:
