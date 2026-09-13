@@ -595,9 +595,6 @@ class TrayApp(Foundation.NSObject):
             self.set_state(phase=PHASE_IDLE, last_text="")
             self._set_linger("没听清", AppKit.NSColor.systemYellowColor())
             return
-        if self.injector.last_newlines:
-            log("换行", f"识别结果含 {self.injector.last_newlines} 个换行，"
-                        f"按 --newline={self.injector.newline_mode} 处理（避免在微信/Slack 里误发送）")
         seg = f"{self.decoder.last_segments} 段，" if self.decoder.last_segments > 1 else ""
         fin = f"其中 {cap.finalized_segments} 段录音期间已定稿，" if cap.finalized_segments else ""
         log("结果", f"{text}   [音频 {dur:.1f}s，{seg}{fin}松手→出字 {decode_ms:.0f}ms]")
@@ -612,10 +609,14 @@ class TrayApp(Foundation.NSObject):
             else:
                 self.set_state(phase=PHASE_IDLE, last_text=text,
                                injected=f"未上屏：目标是「{self.state.get('target_name')}」，"
-                                        f"但你切到了「{cur_name}」且拉不回来")
+                                        f"但你切到了「{cur_name}」且拉不回来",
+                               result_ts=time.monotonic())
                 log("输出", self.state["injected"])
                 return
         injected, inject_ms = self.pipeline.inject(text)
+        if self.injector.last_newlines:
+            log("换行", f"识别结果含 {self.injector.last_newlines} 个换行，"
+                        f"按 --newline={self.injector.newline_mode} 处理（避免在微信/Slack 里误发送）")
         log("输出", f"{injected}   [松手→停录 {(t_rec_stop - t_release) * 1000:.0f}ms"
                     f"（关流 {cap.stream_stop_ms:.0f}+{cap.stream_close_ms:.0f}ms"
                     f"）"
