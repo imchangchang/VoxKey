@@ -272,10 +272,12 @@ class TrayApp(Foundation.NSObject):
         if keys and (st["device_off"] or st["connected"] is False):
             # 收到按键 = 设备明明活着：刚才那个「关机」判定错了（多半只是进了待机，或者是我们
             # 探测时它正在打盹）。立刻翻回在线，别让用户对着「设备已关机」按半天。
-            log("设备", "收到按键报文——设备在线（此前的『待机/关机』是它在打盹或误判）")
-            self.supervisor._emit(DeviceState.READY, "")   # 按键来了 = 设备活着，翻回在线
-            self._set_linger("已唤醒", AppKit.NSColor.systemGreenColor())
-            st = self.get_state()
+            # --no-device 模式没有 supervisor，菜单手动触发不会走到这里，但防御性跳过。
+            if self.supervisor is not None:
+                log("设备", "收到按键报文——设备在线（此前的『待机/关机』是它在打盹或误判）")
+                self.supervisor._emit(DeviceState.READY, "")   # 按键来了 = 设备活着，翻回在线
+                self._set_linger("已唤醒", AppKit.NSColor.systemGreenColor())
+                st = self.get_state()
         ptt = (KC_VOICE in keys
                or (KC_F9 in keys and (mods & (MOD_CTRL | MOD_OPT | MOD_CMD)) ==
                    (MOD_CTRL | MOD_OPT | MOD_CMD)))
