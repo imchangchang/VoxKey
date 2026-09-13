@@ -73,38 +73,6 @@ def split_for_model(audio: np.ndarray, max_s: float = MAX_SEGMENT_S_DEFAULT,
     return segs
 
 
-def tail_window(audio: np.ndarray, max_s: float, search_s: float = 3.0) -> np.ndarray:
-    """取尾部 ≤max_s 的一段，但起点对齐到附近的能量最低处。
-
-    硬切会把句子从中间截断——实测这样能把 funasr-nano 带进重复死循环
-    （预览刷出 `DEEP HARNESSEDEEP HARNESSE…` 那种）。对齐到停顿上就干净了。
-    """
-    sr = SAMPLE_RATE
-    max_n, search_n, win = int(max_s * sr), int(search_s * sr), int(0.05 * sr)
-    if len(audio) <= max_n:
-        return audio
-    lo = max(0, len(audio) - max_n - search_n)
-    hi = len(audio) - max_n + search_n
-    return audio[_lowest_energy_cut(audio, lo, hi, win):]
-
-
-def looks_degenerate(text: str, min_period: int = 6, min_repeats: int = 3,
-                     tol: float = 0.1) -> bool:
-    """识别重复死循环式输出：存在一个长度 ≥min_period 的周期，重复 ≥min_repeats 次。
-
-    实测那种垃圾预览是 `DEEP HARNESSEDEEP HARNESSE…`，周期 13 字符，按固定长度找子串抓不到，
-    得按周期性判。正常句子不会满足（要求 90% 位置同相）。
-    """
-    n = len(text)
-    if n < min_period * min_repeats:
-        return False
-    for p in range(min_period, n // min_repeats + 1):
-        hit = sum(1 for i in range(n - p) if text[i] == text[i + p])
-        if hit >= (n - p) * (1 - tol):
-            return True
-    return False
-
-
 def _join_parts(parts: list[str]) -> str:
     """中文直接拼；两侧都是拉丁字母/数字时补一个空格（英文单词别粘在一起）。"""
     out = ""

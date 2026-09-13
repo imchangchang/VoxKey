@@ -14,7 +14,7 @@
 
 为什么要独立成类：以前这段流程长在 TrayApp 里，和 UI 刷新、状态字典搅在一起，
 想测「松手之后到底发生了什么」只能起整个 App。现在给它一个假注入器和真解码器
-就能单测每一道闸（见 tools/smoke.py 的 pipeline_cases）。
+就能单测每一道闸。
 """
 
 from __future__ import annotations
@@ -65,6 +65,10 @@ class SpeakingPipeline:
         injector     voxkey.inject.Injector
         on_level     每个音频块的实时 RMS 回调（喂悬浮条波形），在音频线程里调
         archive_dir  非 None 时把每句话存成 wav（调 ASR 用），on_archive(wav路径, 摘要dict)
+
+        注：这个类目前主要提供 gates/transcribe/inject/archive 四个工具方法；
+        app.py 里仍自己开 Recorder 并处理设备重枚举，所以 start_recording/stop_recording
+        暂时没人用，留着给下一轮把录音启动也收进来时用。
         """
         self.get_decoder = get_decoder
         self.cfg = config

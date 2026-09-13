@@ -1,7 +1,4 @@
-"""音频采集层：找设备、按 100ms 收块、把一次「按住说话」攒成一段，并在录音期间做伪流式预览。
-
-预览解码跑在单独线程、交给共享的 Decoder 串行化，绝不阻塞采集；松手时只等它 0.15s
-（真机上曾因为等满 5 秒，表现为「松开键后转写中很久」）。
+"""音频采集层：找设备、按 100ms 收块、把一次「按住说话」攒成一段。
 
 长语音的延迟诀窍在 `Recorder._finalize_closed`：录音期间就把「录满一整段」的音频解掉，
 松手只剩最后一段要解——实测 44 秒音频的松手后解码从 3176ms 降到 218ms。
@@ -16,7 +13,7 @@ import time
 import numpy as np
 import sounddevice as sd
 
-from voxkey.transcribe import SAMPLE_RATE, Decoder, _join_parts, looks_degenerate, split_for_model
+from voxkey.transcribe import SAMPLE_RATE, Decoder, _join_parts, split_for_model
 
 BLOCK = 1600             # 100ms
 MAX_UTTERANCE_S = 60     # 单次说话上限
@@ -85,22 +82,16 @@ def find_input_device(name_hint: str = "AU05") -> int | None:
 
 
 class Recorder:
-    """一次录音的采集 + 伪流式预览。预览解码跑在单独线程，绝不阻塞采集。
-
-    每次说话用一个新实例（有自己的音频流和缓冲），解码交给共享的 Decoder 串行化，
-    这样上一句还在解码时又能开始下一句，不会互相踩。
+    """一次录音的采集。每次说话用一个新实例（有自己的音频流和缓冲），
+    解码交给共享的 Decoder 串行化，这样上一句还在解码时又能开始下一句，不会互相踩。
     """
 
-    def __init__(self, decoder: Decoder, device: int | None, is_busy=None,
-                 on_level=None):
+    def __init__(self, decoder: Decoder, device: int | None, on_level=None):
         self.decoder = decoder
         self.device = device
         # on_level(rms)：每块音频回调一次，给悬浮条的波形用（跑在音频线程上，实现要够快，
         # 只做「存一个 float」这种量级的事，别在里面碰 UI）。
         self.on_level = on_level
-        # is_busy()：上一句还在解码/上屏时返回 True——这时预览要让路，否则两边抢模型通道，
-        # 表现就是「松开再按，第二次跟不上」（用户实测反馈）。
-        self.is_busy = is_busy
         self.q: queue.Queue = queue.Queue()
         self.chunks: list[np.ndarray] = []
         self.stream: sd.InputStream | None = None
@@ -121,8 +112,6 @@ class Recorder:
 
     def start(self) -> None:
         self.chunks = []
-        self.pv_text = ""
-        self.pv_n = 0
         self.stream = sd.InputStream(device=self.device, samplerate=SAMPLE_RATE, channels=1,
                                      dtype="float32", blocksize=BLOCK, callback=self._callback)
         self.stream.start()

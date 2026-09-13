@@ -227,8 +227,8 @@ def pill_geometry() -> str:
     return "四态内容均在框内且居中"
 
 
-def pill_long_preview() -> str:
-    """长语音预览：内容行不能超过 MAX_LINES 行、不能顶出窗口，超出时保留最近的（尾巴）。"""
+def pill_long_detail() -> str:
+    """长语音内容裁剪：内容行不能超过 MAX_LINES 行、不能顶出窗口，超出时保留最近的（尾巴）。"""
     import AppKit
     from voxkey import pill as P
 
@@ -269,7 +269,7 @@ def pill_wanted_table() -> str:
     from voxkey.app import FAULT_HOLD_S, pill_wanted
 
     base = {"phase": "idle", "connected": True, "paused": False, "post_ok": True,
-            "mic_ok": True, "injected": "", "reason": "", "preview": "", "last_text": "",
+            "mic_ok": True, "injected": "", "reason": "", "last_text": "",
             "device_off": False, "battery_charging": False}
     # (说明, 状态补丁, 距上次结果多久, 期望可见, auto)
     cases = [
@@ -500,7 +500,7 @@ def main() -> int:
     ok &= check("pipeline 解码器现取", pipeline_decoder_source)
     ok &= check("按键回调异常不杀线程", key_callback_survives)
     ok &= check("悬浮条几何断言", pill_geometry)
-    ok &= check("长语音预览裁剪", pill_long_preview)
+    ok &= check("长语音内容裁剪", pill_long_detail)
     ok &= check("悬浮条显示规则", pill_wanted_table)
     ok &= check("收起前的收场提示", linger_rule)
     ok &= check("说话检测闸门", speech_gate)

@@ -6,7 +6,7 @@
   PYTHONPATH=src python -m voxkey.app --no-device   # 不读按键，用菜单手动开始/结束
 
 一次说话的状态机（悬浮条四态，状态靠文字 + 颜色表达，不用 emoji）：
-  空闲 → 听写中（波形跟实时电平跳，下面一行实时预览）→ 上屏中 → 空闲；
+  空闲 → 听写中（波形跟实时电平跳，下面一行显示已识别内容）→ 上屏中 → 空闲；
   中途按取消键则丢弃这一句。上屏成功后不再复读结果——文字已经打进屏幕里了。
 
 权限（启动体检，结果进菜单）：
@@ -535,31 +535,6 @@ class TrayApp(Foundation.NSObject):
                 self.current_stop = None
 
     @objc.python_method
-    def _archive_audio(self, cap, samples, hold_ms: float) -> None:
-        """把这次按键的音频存下来 + 索引一行（按住多久 / 录到几秒 / 有没有声音）。"""
-        if not self.args.save_audio:
-            return
-        import json as _json
-        import wave
-        self.utt_no += 1
-        n = len(samples)
-        dur = n / SAMPLE_RATE
-        rms = float(np.sqrt((samples ** 2).mean())) if n else 0.0
-        peak = float(np.abs(samples).max()) if n else 0.0
-        d = Path(self.args.save_audio)
-        d.mkdir(parents=True, exist_ok=True)
-        wav = d / f"utt{self.utt_no:03d}_{datetime.now().strftime('%H%M%S')}.wav"
-        with wave.open(str(wav), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(SAMPLE_RATE)
-            w.writeframes((np.clip(samples, -1, 1) * 32767).astype(np.int16).tobytes())
-        with open(d / "index.jsonl", "a") as f:
-            f.write(_json.dumps({"n": self.utt_no, "wav": wav.name, "hold_ms": round(hold_ms),
-                                 "audio_s": round(dur, 2), "rms": round(rms, 4),
-                                 "peak": round(peak, 4)}, ensure_ascii=False) + "\n")
-        log("存档", f"#{self.utt_no} {wav.name} 按住 {hold_ms:.0f}ms / 音频 {dur:.2f}s / RMS {rms:.4f}")
-
     @objc.python_method
     def _finish_utterance(self, cap, samples, t_release, t_rec_stop, cancelled: bool = False) -> None:
         """一次说话的收尾：四道闸 → 解码 → 上屏。业务判断都在 pipeline，这里只管状态与提示。"""
@@ -988,11 +963,7 @@ class TrayApp(Foundation.NSObject):
                 on_key=self.on_key_state, on_state=self.on_device_state,
                 stop_event=self.stop_event,
                 ready_probe=self._device_ready,
-                power_probe=self._device_power_probe,
-                audio_present=self._audio_device_present,
-                reload_audio=reload_audio_devices,
-                is_recording=lambda: self.current_stop is not None,
-                device_hint=self.args.device)
+                power_probe=self._device_power_probe)
             self.supervisor.start()
         else:
             self.set_state(connected=False, reason="--no-device 模式")

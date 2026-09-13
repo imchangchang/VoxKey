@@ -27,9 +27,6 @@ import time
 from enum import Enum
 
 from .logging import log
-from .transcribe import SAMPLE_RATE
-from .device import protocol as P
-from .device.device import VibeKey
 from .device.keyreader import DeviceKeyReader, find_keyboard_path
 
 
@@ -50,29 +47,20 @@ class DeviceWatch(threading.Thread):
     POWER_FAILS_TO_OFF = 2    # 连续几次不应答才判 STANDBY_OR_OFF，防单次抖动误报
 
     def __init__(self, on_key, on_state, stop_event: threading.Event,
-                 ready_probe=None, power_probe=None, audio_present=None,
-                 reload_audio=None, is_recording=None, device_hint: str = "AU05"):
+                 ready_probe=None, power_probe=None):
         super().__init__(daemon=True)
         self.on_key = on_key                      # (mods, keys) 按键报文
         self.on_state = on_state                  # (DeviceState, reason) 状态变化才回调
         self.stop_event = stop_event
         self.ready_probe = ready_probe            # () -> bool：设备真的能用了么
         self.power_probe = power_probe            # () -> str：""=在线，否则为什么问不到
-        self.audio_present = audio_present        # () -> bool：录音设备在 CoreAudio 里吗
-        self.reload_audio = reload_audio          # () -> None：重新枚举音频设备表
-        self.is_recording = is_recording          # () -> bool：正在录音时不做重载/探测
-        self.device_hint = device_hint
         self.reader: DeviceKeyReader | None = None
-        self._dropped_reason: str | None = None   # 同一条掉线原因只报一次
         self._last_reason: str | None = None      # 上次上报的原因（配合 _state 去重）
         self._state: DeviceState | None = None
-        self._device_gone = False                 # 本体不应答（待机/关机）
         self._power_fails = 0
         self._last_power_probe = 0.0
         self._last_alive = time.monotonic()       # 最后一次设备应答的时刻
         self._silence_logged = 0.0
-        self._standby_logged = False              # 待机阈值每次连接只记一次
-        self._woke_device = False                 # 这次连接有没有发过唤醒心跳
 
     # ------------------------------------------------------------ 线程主体
 
@@ -177,7 +165,6 @@ class DeviceWatch(threading.Thread):
             except Exception:
                 pass
             self.reader = None
-        self._device_gone = False
         self._power_fails = 0
         self._emit(DeviceState.DISCONNECTED, reason)
         log("设备", reason)
