@@ -859,9 +859,7 @@ class TrayApp(Foundation.NSObject):
         if self.current_stop is None:
             self.on_key_state(0, [KC_VOICE])
         else:
-            self.current_stop[0].set()
-            self.state["t_release"] = time.monotonic()
-            self.current_stop = None
+            self._stop_recording("菜单手动结束")
 
     def testInject_(self, _sender):
         """不录音、不转写，直接往当前焦点输入框注入一句测试文本——用来单独验证上屏这条路。"""

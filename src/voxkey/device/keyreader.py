@@ -78,7 +78,7 @@ class DeviceKeyReader:
         return self
 
     def is_alive(self) -> bool:
-        """读线程还活着吗。掉了（拔接收器时 hidapi 抛 OSError）要由 KeySupervisor 重开——
+        """读线程还活着吗。掉了（拔接收器时 hidapi 抛 OSError）要由 DeviceWatch 重开——
         光看 `reader is not None` 会以为它还在，表现就是「插回去按键没反应，得重启 App」。"""
         return self._thread is not None and self._thread.is_alive()
 
