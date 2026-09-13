@@ -149,7 +149,7 @@ def main() -> int:
             stop_ev = threading.Event()
             state["stop"] = stop_ev
             state["cancel"].clear()
-            cap = Recorder(decoder, device, on_preview=lambda t: log("预览", t))
+            cap = Recorder(decoder, device)
             threading.Thread(target=handle_utterance, args=(cap, stop_ev),
                              daemon=True).start()
             log("按键", f"{combo_name(mods, keys)}  ← 按下，开始录音")
