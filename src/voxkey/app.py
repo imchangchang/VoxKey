@@ -46,6 +46,8 @@ from voxkey.audio import (SPEECH_MIN_PEAK, SPEECH_MIN_SEC, Recorder, find_input_
 from voxkey.device import protocol as P
 from voxkey.device.device import VibeKey
 from voxkey.devicewatch import DeviceState, DeviceWatch
+from voxkey.logging import log
+from voxkey.state import State
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, MOD_CTRL,
                                      MOD_OPT, DeviceKeyReader, find_keyboard_path)
 from voxkey.inject import Injector, ax_trusted, frontmost_info, reactivate
@@ -76,6 +78,7 @@ KNOWN_KEYCODES = {KC_VOICE, KC_ESC, KC_F9, KC_F11, *ROUTE_KEYS}
 
 MIN_AUDIO_S = 0.5       # 短于这个时长直接丢（用户要求：<0.5s 忽略，避免静音被模型脑补出字）
 FAULT_HOLD_S = 3.0      # 「未上屏」提示在悬浮条上留多久（用户要求：空闲就收起来）
+BATTERY_FRESH_S = 120.0 # 电量/充电读数多久算新鲜（只在按键时读一次，久了就不信它）
 LINGER_S = 1.2          # 悬浮条收起之前，先把「收场状态」显示这么久（用户要求：消失前要有对应交互）
 PHASE_META = {
     PHASE_IDLE: ("circle", None, "空闲", "○"),
@@ -100,28 +103,30 @@ def next_linger(want_pill: bool, last_want: bool, linger_until: float,
     return linger_until
 
 
-def pill_wanted(st: dict, fault_age: float, auto: bool = True) -> bool:
+def pill_wanted(st: dict, fault_age: float, battery_age: float = 1e9,
+                auto: bool = True) -> bool:
     """悬浮条该不该出现（用户要求：空闲时不占屏幕，只在「有事要说」的时候弹出来）。
 
-    出现的情况：听写中 / 上屏中、设备掉线或还在探测、暂停了、权限缺失、
-    模型加载失败这类持续错误、刚上屏失败的那几秒、以及**充电中**（用户要求：充电时一直挂着，
-    这样随时能看见电量和充电状态）。
+    出现的情况：听写中 / 处理中、设备掉线或还在探测、暂停了、权限缺失、
+    模型加载失败这类持续错误、刚上屏失败的那几秒、以及**充电中**（用户要求：充电时挂着，
+    这样能看见电量和充电状态）。
+
+    充电那条要求数据**新鲜**：电量/充电状态只在按键那一刻读一次（不再周期探测，省得
+    一直把设备吵醒、耗它电池），所以插拔充电线之后这个字段可能是过期的。拿过期数据
+    把浮窗钉在屏幕上不对，所以只认 BATTERY_FRESH_S 内的读数。
     抽成纯函数是为了能直接断言这个真值表（见 tools/smoke.py），不用起整个 App。
     """
     if not auto:
         return False
+    fresh_charging = st["battery_charging"] and battery_age < BATTERY_FRESH_S
     return bool(
         st["phase"] in (PHASE_REC, PHASE_PROC)
         or st["phase"] == PHASE_ERR                         # 模型加载失败、麦克风打不开
         or st["paused"]                                     # 用户主动停了监听，得让人看见
         or st["connected"] in (False, None)                 # 设备掉线 / 还在探测
         or not st["post_ok"] or not st["mic_ok"]            # 权限缺失（None = 还在查）
-        or st["battery_charging"]                           # 充电中：一直显示电量
+        or fresh_charging                                    # 充电中（数据够新才算）
         or (st["injected"].startswith("未上屏") and fault_age < FAULT_HOLD_S))
-
-
-def log(tag: str, msg: str) -> None:
-    print(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]}  {tag:4s}  {msg}", flush=True)
 
 
 # ---------------------------------------------------------------- 权限
@@ -194,14 +199,16 @@ class TrayApp(Foundation.NSObject):
         self._checked_visibility = False
         self._flash = None
         self._icon_key = None           # 上次设过的菜单栏图标（状态没变就不重建图片）
-        self.state_lock = threading.Lock()
-        self.state = {
-            "phase": PHASE_IDLE, "connected": None, "reason": "", "paused": False,
-            "last_text": "", "device_info": "设备信息读取中…",
-            "mic_ok": None, "post_ok": None, "injected": "", "device_off": False,
-            "fw_version": "", "battery_pct": None, "battery_mv": None,
-            "battery_charging": False,          # 悬浮条角标（电量/电压/是否充电）
-        }
+        # 状态收口到 State：读写都加锁，值变了才通知订阅者（见 state.py）
+        self.state = State(
+            phase=PHASE_IDLE, connected=None, reason="", paused=False,
+            last_text="", device_info="设备信息读取中…",
+            mic_ok=None, post_ok=None, injected="", device_off=False,
+            # 悬浮条角标（电量/电压/是否充电）：只在按键时读一次，所以带时间戳判新鲜度
+            fw_version="", battery_pct=None, battery_mv=None,
+            battery_charging=False, battery_ts=0.0,
+        )
+        self.state.subscribe(self._on_state_changed)   # 订阅必须在 State 建好之后
         self.gesture_start = None
         self.utt_no = 0
         self._routed = set()
@@ -210,10 +217,6 @@ class TrayApp(Foundation.NSObject):
         self._last_unknown: tuple = ()  # 上次报过的未知键码（去重，别刷屏）
         self._woke_device = False       # 这次连接有没有给设备发过唤醒心跳
         self._standby_logged = False    # 待机阈值每次连接只记一次
-        # 每 3 秒问一次厂商通道会一直「吵醒」设备，它自己那个 300 秒待机就永远触发不了。
-        # 要观察待机（或单纯省电）时用 VOXKEY_NO_DEVICE_PROBE=1 关掉周期探测，
-        # 这时设备状态只在启动时读一次，之后靠按键报文判断在线。
-        self._probe_enabled = not os.environ.get("VOXKEY_NO_DEVICE_PROBE")
         self._linger_text = ""          # 收场提示的文字（"" = 没有）
         self._linger_color = None
         self._linger_until = 0.0        # 收场倒计时的到期时刻（0 = 还没开始计时）
@@ -239,13 +242,11 @@ class TrayApp(Foundation.NSObject):
 
     @objc.python_method
     def set_state(self, **kw) -> None:
-        with self.state_lock:
-            self.state.update(kw)
+        self.state.update(**kw)          # State 内部加锁、去重、通知订阅者
 
     @objc.python_method
     def get_state(self) -> dict:
-        with self.state_lock:
-            return dict(self.state)
+        return self.state.snapshot()
 
     # ---------- 按键回调（reader 线程） ----------
 
@@ -355,9 +356,9 @@ class TrayApp(Foundation.NSObject):
         self.current_stop = (stop_ev,)
         self.cancel_event.clear()
         self.set_state(phase=PHASE_REC, reason="")
-        self.state["t_press"] = time.monotonic()
+        self.state.update(t_press=time.monotonic())
         pid, name = frontmost_info()
-        self.state["target_pid"], self.state["target_name"] = pid, name
+        self.state.update(target_pid=pid, target_name=name)
         log("按键", "开始录音")
         threading.Thread(target=self.handle_utterance, args=(stop_ev,), daemon=True).start()
 
@@ -368,7 +369,6 @@ class TrayApp(Foundation.NSObject):
         if state is not DeviceState.READY:
             self._audio_dirty = True      # 掉过线/还没就绪，音频设备表要重新枚举
             self._woke_device = False     # 下次连上要重新唤醒一次
-            self._standby_logged = state is DeviceState.DISCONNECTED   # 只真掉线才重记
             # 设备不在线时版本/电量读不到，角标跟着空掉，别留着上一次的旧数字
             self.set_state(connected=(state is not DeviceState.DISCONNECTED),
                            reason=reason, device_off=state is DeviceState.STANDBY_OR_OFF,
@@ -386,8 +386,12 @@ class TrayApp(Foundation.NSObject):
     # ---------- 设备「真的能用了吗」（插回来时报「已连接」之前先过这一关） ----------
 
     @objc.python_method
-    def _read_device_status(self) -> str:
-        """读一次设备本体状态。返回 ""=在线；非空字符串 = 为什么问不到。
+    def refresh_device_status(self) -> str:
+        """读一次设备本体状态（版本/电量/充电），返回 ""=在线；非空 = 为什么问不到。
+
+        **只在按键那一刻调**（用户拍板）：用户按键时设备必然活跃，这时候读最准、也最省——
+        以前每 3 秒问一次，一天两万多次无线请求，还会（疑似）让设备永远进不了 300 秒待机，
+        白白耗它自己的电池。空闲时我们一概不问。
 
         一次会话里把版本和电量都读掉——电量顺便喂给悬浮条右上角的角标（用户要求）。
         连着第一次读时顺带把「待机秒数」也读出来记进日志：协议里写着「待机超时后厂商口不响应」，
@@ -404,7 +408,7 @@ class TrayApp(Foundation.NSObject):
                     secs = vk.standby_seconds()
                     if secs is not None:
                         log("设备", f"待机设置 {secs}s（超时后厂商通道不再响应——所以「问不到」"
-                                    f"不等于关机，见 _device_power_probe）")
+                                    f"不等于关机，见 devicewatch 的说明）")
         except Exception as e:
             return f"{type(e).__name__}: {e}"
         pct = bat[0] if bat else None
@@ -415,7 +419,8 @@ class TrayApp(Foundation.NSObject):
         if info != self.get_state()["device_info"]:      # 变了才记，别每 3 秒刷一遍
             log("设备", info)
         self.set_state(fw_version=ver, battery_pct=pct, battery_charging=charging,
-                       battery_mv=(bat[1] if bat else None), device_info=info)
+                       battery_mv=(bat[1] if bat else None), device_info=info,
+                       battery_ts=time.monotonic())   # 打时间戳：显示规则只认新鲜的读数
         return ""
 
     @objc.python_method
@@ -431,21 +436,6 @@ class TrayApp(Foundation.NSObject):
                 vk.send(P.build_frame(0x06, 0x01, 0x23, 0x00))
         except Exception as e:
             log("设备", f"心跳没发出去：{e}")
-
-    @objc.python_method
-    def _device_power_probe(self) -> str:
-        """周期性问一句「设备本体还在吗」。返回 ""=在线，否则返回「为什么问不到」。
-
-        **待机和真关机区分不了**，别在这儿白费劲：实测（静置 7 分钟、期间不碰厂商通道也不碰设备）
-        设备 300 秒没用就进待机，之后厂商通道一律不应答；而真关机是同样的现象，连发 heartbeat
-        都叫不醒（试过）。而且待机时**第一次按键会被设备自己吞掉**（用户实测：第一次没反应、
-        第二次才行），所以只能对外说「待机/关机中」，等按键报文来了再翻回在线。
-        """
-        if self.current_stop is not None:
-            return ""                      # 录音中不打扰
-        if not self._probe_enabled:
-            return ""                      # VOXKEY_NO_DEVICE_PROBE=1：完全不打搅设备
-        return self._read_device_status()
 
     @objc.python_method
     def _audio_device_present(self) -> bool:
@@ -470,7 +460,7 @@ class TrayApp(Foundation.NSObject):
         if not self._woke_device:
             self._woke_device = True
             self._wake_device()          # 先敲一下（聊胜于无，见 _wake_device 的说明）
-        if self._read_device_status() != "":
+        if self.refresh_device_status() != "":
             return False
         return self._audio_device_present()
 
@@ -481,7 +471,7 @@ class TrayApp(Foundation.NSObject):
         if self.current_stop is None:
             return
         self.current_stop[0].set()
-        self.state["t_release"] = time.monotonic()
+        self.state.update(t_release=time.monotonic())
         self.current_stop = None
         self.set_state(phase=PHASE_PROC)   # 松手即切「处理中」，覆盖关流+转写+注入整段
         log("按键", f"{why} → 上屏中…")
@@ -520,6 +510,9 @@ class TrayApp(Foundation.NSObject):
                 log("错误", f"麦克风打不开（重试后仍失败）：{e2}")
                 self.current_stop = None
                 return
+        # 按键这一刻设备必然活跃：顺手把版本/电量读一遍（用户拍板：不在空闲时周期探测）。
+        # 放在录音线程里，晚一点读没关系，绝不拖慢按键响应。
+        threading.Thread(target=self.refresh_device_status, daemon=True).start()
         samples = cap.run_until(lambda: stop_ev.is_set() or self.cancel_event.is_set())
         t_rec_stop = time.monotonic()
         t_release = self.get_state().get("t_release") or t_rec_stop
@@ -586,7 +579,7 @@ class TrayApp(Foundation.NSObject):
                                injected=f"未上屏：目标是「{self.state.get('target_name')}」，"
                                         f"但你切到了「{cur_name}」且拉不回来",
                                result_ts=time.monotonic())
-                log("输出", self.state["injected"])
+                log("输出", self.get_state()["injected"])
                 return
         injected, inject_ms = self.pipeline.inject(text)
         if self.injector.last_newlines:
@@ -656,7 +649,8 @@ class TrayApp(Foundation.NSObject):
 
         # 悬浮条：空闲时收起来不占位置（用户要求），只在「有事要说」的时候出现。
         age = time.monotonic() - st.get("result_ts", 0)
-        want_pill = pill_wanted(st, age, self.pill_auto)
+        batt_age = time.monotonic() - st.get("battery_ts", 0.0)
+        want_pill = pill_wanted(st, age, batt_age, self.pill_auto)
         fault = st["injected"].startswith("未上屏") and age < FAULT_HOLD_S
         # 收场提示：want_pill 由真变假的那一刻才开始倒计时，之前只是把「准备说什么」记着
         now = time.monotonic()
@@ -907,6 +901,17 @@ class TrayApp(Foundation.NSObject):
     # ---------- 启动 ----------
 
     @objc.python_method
+    def _on_state_changed(self, snap: dict, changed: tuple) -> None:
+        """状态变化时的钩子（由 State 在写入线程里回调）。
+
+        故意只做「记一笔日志」这种便宜事：UI 刷新统一走主线程的 tick_（0.12 秒看一眼快照），
+        不在这里直接碰 AppKit——跨线程改 UI 是另一类难查的问题。
+        这里存在的意义是：状态何时被谁改了，日志里能对得上时间轴。
+        """
+        if "phase" in changed:
+            log("状态", f"phase → {snap['phase']}"
+                        + (f"（{snap['reason']}）" if snap.get("reason") else ""))
+
     def setup_ui(self) -> None:
         app = AppKit.NSApplication.sharedApplication()
         app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
@@ -960,8 +965,7 @@ class TrayApp(Foundation.NSObject):
             self.supervisor = DeviceWatch(
                 on_key=self.on_key_state, on_state=self.on_device_state,
                 stop_event=self.stop_event,
-                ready_probe=self._device_ready,
-                power_probe=self._device_power_probe)
+                ready_probe=self._device_ready)
             self.supervisor.start()
         else:
             self.set_state(connected=False, reason="--no-device 模式")
@@ -1004,7 +1008,7 @@ class TrayApp(Foundation.NSObject):
         threading.Thread(target=load_model, daemon=True).start()
 
         def read_device_info():
-            if not self._read_device_status():
+            if not self.refresh_device_status():
                 self.set_state(device_info="厂商通道没打开")
         threading.Thread(target=read_device_info, daemon=True).start()
 

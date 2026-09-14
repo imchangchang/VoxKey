@@ -43,24 +43,17 @@ class DeviceWatch(threading.Thread):
     POLL_S = 2.0              # 主循环间隔（查枚举、查读线程还活着没）
     READY_TIMEOUT_S = 5.0     # 等设备证明自己可用的上限；超时按 STANDBY_OR_OFF 处理（开机会被周期探测纠正）
     READY_SETTLE_S = 1.0      # 句柄打开后至少等这么久再判就绪（纯保险）
-    POWER_PROBE_EVERY_S = 3.0 # 周期探测设备本体的间隔
-    POWER_FAILS_TO_OFF = 2    # 连续几次不应答才判 STANDBY_OR_OFF，防单次抖动误报
 
     def __init__(self, on_key, on_state, stop_event: threading.Event,
-                 ready_probe=None, power_probe=None):
+                 ready_probe=None):
         super().__init__(daemon=True)
         self.on_key = on_key                      # (mods, keys) 按键报文
         self.on_state = on_state                  # (DeviceState, reason) 状态变化才回调
         self.stop_event = stop_event
         self.ready_probe = ready_probe            # () -> bool：设备真的能用了么
-        self.power_probe = power_probe            # () -> str：""=在线，否则为什么问不到
         self.reader: DeviceKeyReader | None = None
         self._last_reason: str | None = None      # 上次上报的原因（配合 _state 去重）
         self._state: DeviceState | None = None
-        self._power_fails = 0
-        self._last_power_probe = 0.0
-        self._last_alive = time.monotonic()       # 最后一次设备应答的时刻
-        self._silence_logged = 0.0
 
     # ------------------------------------------------------------ 线程主体
 
@@ -82,7 +75,6 @@ class DeviceWatch(threading.Thread):
         if self.reader is None:
             self._open_and_wait_ready()
             return
-        self._check_power()
 
     def _open_and_wait_ready(self) -> None:
         try:
@@ -117,36 +109,6 @@ class DeviceWatch(threading.Thread):
 
     # ------------------------------------------------------------ 周期功率/在线探测
 
-    def _check_power(self) -> None:
-        """厂商通道答不答话是「设备本体在不在线」的唯一判据（详见模块注释）。"""
-        if self.power_probe is None or self.reader is None:
-            return
-        now = time.monotonic()
-        if now - self._last_power_probe < self.POWER_PROBE_EVERY_S:
-            return
-        self._last_power_probe = now
-        why = self.power_probe()          # ""=在线
-        if not why:
-            self._last_alive = now
-            self._power_fails = 0
-            if self._state is DeviceState.STANDBY_OR_OFF:
-                self._emit(DeviceState.READY)
-                log("设备", "设备本体应答了，语音键监听中")
-            return
-        self._power_fails += 1
-        silence = now - self._last_alive
-        if self._power_fails == 1:
-            log("设备", f"厂商通道第一次问不到（{why}）——继续观察（可能只是待机）")
-        if self._power_fails >= self.POWER_FAILS_TO_OFF and self._state is not DeviceState.STANDBY_OR_OFF:
-            self._emit(DeviceState.STANDBY_OR_OFF, "设备已关机")
-            log("设备", f"连续 {self._power_fails} 次问不到，已沉默 {silence:.0f}s（{why}）"
-                        f"——待机或关机（区分不了），等它醒")
-        elif self._state is DeviceState.STANDBY_OR_OFF and now - self._silence_logged >= 60.0:
-            # 长时间沉默每分钟记一条，对着时间轴能看出沉默是不是卡在待机阈值上
-            self._silence_logged = now
-            log("设备", f"仍问不到（已沉默 {silence:.0f}s，最后一次应答在 "
-                        f"{time.strftime('%H:%M:%S', time.localtime(time.time() - silence))}）")
-
     # ------------------------------------------------------------ 状态上报
 
     def _emit(self, state: DeviceState, reason: str = "") -> None:
@@ -165,7 +127,6 @@ class DeviceWatch(threading.Thread):
             except Exception:
                 pass
             self.reader = None
-        self._power_fails = 0
         self._emit(DeviceState.DISCONNECTED, reason)
         log("设备", reason)
 

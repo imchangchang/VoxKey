@@ -76,6 +76,35 @@ def pipeline_decoder_source() -> str:
     raise AssertionError("空解码器居然没报错")
 
 
+def log_lines_not_interleaved() -> str:
+    """多线程打日志不能串行（两条日志叠成一行）。
+
+    print() 分几次写（正文、分隔符、换行），多线程下会交错——真出现过两条日志挤在一行，
+    排障时没法看。现在 log() 加锁并整行一次写出，这里用并发压一压验证。
+    """
+    import io
+    import threading
+    from contextlib import redirect_stdout
+    from voxkey.logging import log
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        threads = [threading.Thread(target=lambda i=i: [log("测试", f"线程{i}-第{j}条") for j in range(50)])
+                   for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    lines = buf.getvalue().splitlines()
+    n = 8 * 50
+    if len(lines) != n:
+        raise AssertionError(f"期望 {n} 行，实际 {len(lines)} 行（说明有交错）")
+    bad = [l for l in lines if l.count("  ") < 2 or "测试" not in l]
+    if bad:
+        raise AssertionError(f"格式不对：{bad[:2]}")
+    return f"8 线程 × 50 条 = {n} 行，无交错"
+
+
 def structure_rules() -> str:
     """静态结构约定（扫源码，不连设备）：
 
@@ -265,33 +294,43 @@ def pill_long_detail() -> str:
 
 
 def pill_wanted_table() -> str:
-    """悬浮条该不该出现：真值表断言（用户要求——空闲收起不占位置，听写/上屏/异常才出现）。"""
-    from voxkey.app import FAULT_HOLD_S, pill_wanted
+    """悬浮条该不该出现：真值表断言（空闲收起不占位置；听写/处理/异常/充电才出现）。
+
+    这里有两个不同的「年龄」，别混：
+      fault_age   距上一次「未上屏」结果多久（决定失败提示还留不留）
+      batt_age    距上一次读到电量/充电状态多久（不再周期探测，久了就不信它）
+    """
+    from voxkey.app import BATTERY_FRESH_S, FAULT_HOLD_S, pill_wanted
 
     base = {"phase": "idle", "connected": True, "paused": False, "post_ok": True,
             "mic_ok": True, "injected": "", "reason": "", "last_text": "",
             "device_off": False, "battery_charging": False}
-    # (说明, 状态补丁, 距上次结果多久, 期望可见, auto)
+    OLD = 1e9
+    # (说明, 状态补丁, fault_age, 期望可见, auto, batt_age)
     cases = [
-        ("空闲且一切正常 → 收起", {}, 99.0, False, True),
-        ("听写中 → 出现", {"phase": "rec"}, 99.0, True, True),
-        ("上屏中 → 出现", {"phase": "proc"}, 99.0, True, True),
-        ("设备掉线 → 出现（指示没插入）", {"connected": False}, 99.0, True, True),
-        ("设备还在探测 → 出现", {"connected": None}, 99.0, True, True),
-        ("接收器插着但设备关机 → 出现", {"connected": False, "device_off": True}, 99.0, True, True),
-        ("充电中 → 一直显示（用户要求）", {"battery_charging": True}, 99.0, True, True),
-        ("暂停监听 → 出现", {"paused": True}, 99.0, True, True),
-        ("缺辅助功能权限 → 出现", {"post_ok": False}, 99.0, True, True),
-        ("麦克风没权限 → 出现", {"mic_ok": False}, 99.0, True, True),
-        ("模型加载失败 → 出现", {"phase": "err"}, 99.0, True, True),
-        ("刚上屏失败 → 出现一会儿", {"injected": "未上屏：没有辅助功能权限"}, 1.0, True, True),
-        ("上屏失败已过去 → 收起",
-         {"injected": "未上屏：没有辅助功能权限"}, FAULT_HOLD_S + 1.0, False, True),
-        ("菜单里关掉自动显示 → 永不出现", {"phase": "rec"}, 0.0, False, False),
+        ("空闲且一切正常 → 收起", {}, OLD, False, True, OLD),
+        ("听写中 → 出现", {"phase": "rec"}, OLD, True, True, OLD),
+        ("处理中 → 出现", {"phase": "proc"}, OLD, True, True, OLD),
+        ("设备掉线 → 出现（指示没插入）", {"connected": False}, OLD, True, True, OLD),
+        ("设备还在探测 → 出现", {"connected": None}, OLD, True, True, OLD),
+        ("接收器插着但设备关机 → 出现", {"connected": False, "device_off": True}, OLD, True, True, OLD),
+        ("暂停监听 → 出现", {"paused": True}, OLD, True, True, OLD),
+        ("缺辅助功能权限 → 出现", {"post_ok": False}, OLD, True, True, OLD),
+        ("麦克风没权限 → 出现", {"mic_ok": False}, OLD, True, True, OLD),
+        ("模型加载失败 → 出现", {"phase": "err"}, OLD, True, True, OLD),
+        ("刚上屏失败 → 出现一会儿", {"injected": "未上屏：没有辅助功能权限"},
+         FAULT_HOLD_S - 1.0, True, True, OLD),
+        ("上屏失败已过去 → 收起", {"injected": "未上屏：没有辅助功能权限"},
+         FAULT_HOLD_S + 1.0, False, True, OLD),
+        ("充电中且读数新鲜 → 显示（用户要求）", {"battery_charging": True},
+         OLD, True, True, BATTERY_FRESH_S - 1.0),
+        ("充电但读数过期 → 不显示（不周期探测了，别拿旧数据钉住浮窗）",
+         {"battery_charging": True}, OLD, False, True, BATTERY_FRESH_S + 1.0),
+        ("菜单里关掉自动显示 → 永不出现", {"phase": "rec"}, 0.0, False, False, 0.0),
     ]
     fails = []
-    for name, patch, age, want, auto in cases:
-        got = pill_wanted({**base, **patch}, age, auto)
+    for name, patch, fault_age, want, auto, batt_age in cases:
+        got = pill_wanted({**base, **patch}, fault_age, batt_age, auto)
         if got != want:
             fails.append(f"{name}：期望 {want} 实得 {got}")
     if fails:
@@ -496,6 +535,7 @@ def main() -> int:
 
     ok = True
     ok &= check("包导入", imports_ok)
+    ok &= check("日志多线程不串行", log_lines_not_interleaved)
     ok &= check("结构约定（线程 args/元组）", structure_rules)
     ok &= check("pipeline 解码器现取", pipeline_decoder_source)
     ok &= check("按键回调异常不杀线程", key_callback_survives)

@@ -17,6 +17,8 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
+from .logging import log
+
 
 class State:
     def __init__(self, **initial):
@@ -51,6 +53,5 @@ class State:
             try:
                 fn(snap, changed)
             except Exception as e:          # 订阅者的错不能反过来打断写状态的一方
-                from .logging import log
                 log("状态", f"订阅回调出错：{type(e).__name__}: {e}")
         return changed

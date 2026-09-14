@@ -19,6 +19,8 @@ import threading
 import time
 from datetime import datetime
 
+from voxkey.logging import log
+
 import numpy as np
 import sounddevice as sd
 
@@ -33,10 +35,6 @@ from voxkey.transcribe import Decoder
 
 KEY_NAMES = dict(KEY_LABELS)
 MOD_NAMES = [(MOD_CTRL, "⌃"), (MOD_OPT, "⌥"), (MOD_CMD, "⌘"), (MOD_SHIFT, "⇧")]
-
-
-def log(tag: str, msg: str) -> None:
-    print(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]}  {tag:4s}  {msg}", flush=True)
 
 
 def combo_name(mods: int, keys: list[int]) -> str:
