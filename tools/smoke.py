@@ -316,7 +316,7 @@ def pill_wanted_table() -> str:
         ("接收器插着但设备关机 → 出现", {"connected": False, "device_off": True}, OLD, True, True, OLD),
         ("暂停监听 → 出现", {"paused": True}, OLD, True, True, OLD),
         ("缺辅助功能权限 → 出现", {"post_ok": False}, OLD, True, True, OLD),
-        ("麦克风没权限 → 出现", {"mic_ok": False}, OLD, True, True, OLD),
+        ("麦克风没权限 → 出现（且浮窗要写明是麦克风）", {"mic_ok": False}, OLD, True, True, OLD),
         ("模型加载失败 → 出现", {"phase": "err"}, OLD, True, True, OLD),
         ("刚上屏失败 → 出现一会儿", {"injected": "未上屏：没有辅助功能权限"},
          FAULT_HOLD_S - 1.0, True, True, OLD),

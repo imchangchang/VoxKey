@@ -199,6 +199,7 @@ class TrayApp(Foundation.NSObject):
         self._checked_visibility = False
         self._flash = None
         self._icon_key = None           # 上次设过的菜单栏图标（状态没变就不重建图片）
+        self._mic_denied_warned = False # 麦克风被撤销只警告一次（别每 2 秒刷屏）
         # 状态收口到 State：读写都加锁，值变了才通知订阅者（见 state.py）
         self.state = State(
             phase=PHASE_IDLE, connected=None, reason="", paused=False,
@@ -708,6 +709,11 @@ class TrayApp(Foundation.NSObject):
                 # 大标题取冒号前那半句，剩下的放内容行——原来只有「未上屏」三个字，看不出原因
                 head, _, tail = (st["reason"] or "出错了").partition("：")
                 text, color, detail = (head or "出错了"), ORANGE, (tail.strip() or None)
+            elif not st["mic_ok"]:
+                # 麦克风没权限时 macOS **不报错**，而是给一条全 0 的流——录音照常"成功"、
+                # 只是录到静音，最后被说话检测丢掉。表现就是「按键没反应」而看不出原因，
+                # 所以这里必须明确写出来（真踩过：权限被撤销后，用户完全不知道为什么录不上）。
+                text, color = "缺麦克风权限", ORANGE
             elif not st["post_ok"]:
                 text, color = "缺辅助功能权限", ORANGE
             elif fault:
@@ -769,6 +775,16 @@ class TrayApp(Foundation.NSObject):
             log("权限", f"变更：麦克风 {'已授权' if mic else '未授权'}，"
                         f"辅助功能 {'已授权' if post else '未授权'}"
                         + ("（现在可以上屏了）" if post else ""))
+            if mic:
+                self._mic_denied_warned = False      # 恢复了；下次再掉还能再提醒一次
+            elif not self._mic_denied_warned:
+                # 麦克风被撤销时 macOS **不报错**，只给一条全 0 的流：录音会「成功但全是静音」，
+                # 最后被说话检测当「没说话」丢掉。用户完全看不出原因（真踩过），所以必须写明，
+                # 并顺手触发一次系统请求——如果系统还允许弹窗，用户点一下就好了。
+                self._mic_denied_warned = True
+                log("权限", "麦克风权限没了：现在录到的会是静音（说话检测会把它当没说话丢掉）。"
+                            "到 系统设置→隐私与安全性→麦克风 里勾上本程序，或从菜单点「权限：麦克风」")
+                ensure_mic_permission()
 
     @objc.python_method
     def _pill_cfg(self):

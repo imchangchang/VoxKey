@@ -25,9 +25,21 @@
 ## 装依赖
 
 ```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -e .                 # 软件本体
-.venv/bin/pip install -e '.[tools]'        # 另加命令行 demo 要的 pyperclip + pynput
+# 推荐 uv（系统自带的 python 是 3.9，跑不了本项目）
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e '.[tools]'
+
+# 或者你有 python3.12 的话：
+python3.12 -m venv .venv && .venv/bin/pip install -e '.[tools]'
+```
+
+**别让 venv 的基础解释器指向仓库外**：uv 默认把 Python 装在 `~/.local/share/uv/python`，
+仓库搬走/那个目录被清掉，`.venv/bin/python` 就成了死链接、整个环境废掉（真踩过：
+旧环境的基础解释器在另一个目录里，那个目录一没，程序连重启都起不来）。
+把基础解释器也放进仓库，就再也不会有这个问题：
+
+```bash
+export UV_PYTHON_INSTALL_DIR="$PWD/.uv-python" UV_CACHE_DIR="$PWD/.uv-cache"   # 两个目录都已 gitignore
 ```
 
 本机没装 `python3.12`（系统只有 3.9），现有的 `.venv` 是用 uv 建的——uv 建的 venv 不带 pip，
