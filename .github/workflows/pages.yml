@@ -5,7 +5,9 @@ name: 静态页
 # 仓库转公开之后不用改任何东西，直接就能跑。
 on:
   push:
-    branches: [main]
+    # 临时把 release-macos 也加上：为了**验证部署链路本身能跑通**（默认分支还没推上去）。
+    # 验完就撤掉，只留 main。
+    branches: [main, release-macos]
     paths: ["site/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
