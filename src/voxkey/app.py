@@ -806,10 +806,11 @@ class TrayApp(Foundation.NSObject):
 
     @objc.python_method
     def menubar_image(self):
-        """菜单栏图标：设计稿那张线稿里取出来的大圆（生成脚本见 packaging/make_icon.py）。
+        """菜单栏图标：整张设计稿等比缩下来的模板图（生成脚本见 packaging/make_icon.py）。
 
-        是**模板图**（纯黑 + alpha），不用管菜单栏明暗，系统自己反色；
-        状态差异靠 setContentTintColor_ 染的颜色表达。
+        是**模板图**（纯黑 + alpha），颜色完全交给系统——深色菜单栏画白、浅色画黑。
+        所以这里不表达状态：既不改颜色（见 set_icon 里为什么绝不能碰 contentTintColor），
+        形状也只有设计稿这一种。状态看悬浮条和下拉菜单。
         """
         if self._menubar_img is None:
             self._menubar_img = load_menubar_image() or False      # False = 资源不在，别反复读盘
