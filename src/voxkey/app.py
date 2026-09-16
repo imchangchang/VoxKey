@@ -91,6 +91,34 @@ PHASE_META = {
 }
 
 
+def load_menubar_image():
+    """读菜单栏图标（模板图）。资源不在就返回 None，调用方退回 SF Symbol。
+
+    两种像素密度都声明成 18pt：18px 是 @1x、36px 是 @2x，系统自己挑合适的那张。
+    提到模块级是为了能直接断言（见 tools/smoke.py）——菜单栏图标在没接通屏幕的机器上
+    根本看不到，光靠肉眼看不出它是不是加载成功。
+    """
+    d = Path(__file__).resolve().parent / "assets"
+    img = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(18.0, 18.0))
+    got = False
+    for name in ("menubar.png", "menubar@2x.png"):
+        p = d / name
+        if not p.exists():
+            continue
+        data = AppKit.NSData.dataWithContentsOfFile_(str(p))
+        rep = AppKit.NSBitmapImageRep.imageRepWithData_(data) if data else None
+        if rep is None:
+            continue
+        rep.setSize_(AppKit.NSMakeSize(18.0, 18.0))
+        img.addRepresentation_(rep)
+        got = True
+    if got:
+        # 模板图：系统只取 alpha 取形，按菜单栏明暗自己反色。
+        # 忘了这句的后果是深色菜单栏下图标整个看不见——冒烟里有一条断言钉着。
+        img.setTemplate_(True)
+    return img if got else None
+
+
 def next_linger(want_pill: bool, last_want: bool, linger_until: float,
                 now: float, hold_s: float) -> float:
     """收场倒计时：`want_pill` 由真变假的那一刻开始计时，返回新的到期时刻（0 = 没在计时）。
@@ -202,6 +230,7 @@ class TrayApp(Foundation.NSObject):
         self._checked_visibility = False
         self._flash = None
         self._icon_key = None           # 上次设过的菜单栏图标（状态没变就不重建图片）
+        self._menubar_img = None        # 设计稿的菜单栏图；None=还没读，False=资源不在
         self._mic_denied_warned = False # 麦克风被撤销只警告一次（别每 2 秒刷屏）
         # 状态收口到 State：读写都加锁，值变了才通知订阅者（见 state.py）
         self.state = State(
@@ -760,13 +789,25 @@ class TrayApp(Foundation.NSObject):
         return img
 
     @objc.python_method
+    def menubar_image(self):
+        """菜单栏图标：设计稿那张线稿里取出来的大圆（生成脚本见 packaging/make_icon.py）。
+
+        是**模板图**（纯黑 + alpha），不用管菜单栏明暗，系统自己反色；
+        状态差异靠 setContentTintColor_ 染的颜色表达。
+        """
+        if self._menubar_img is None:
+            self._menubar_img = load_menubar_image() or False      # False = 资源不在，别反复读盘
+        return self._menubar_img or None
+
+    @objc.python_method
     def set_icon(self, name: str, tint) -> None:
         # tick 每 0.12 秒调一次，而状态大多数时候没变。实测每建一次 SF Symbol 图片要 0.027ms，
         # 什么都不判就重建 = 白白吃掉一个核的 ~22%。所以状态没变就什么都不做。
         if self._icon_key == (name, tint):
             return
         self._icon_key = (name, tint)
-        img = self.symbol(name)
+        # 设计稿的图标优先；没有资源才退回 SF Symbol（形状随状态变，见 PHASE_META）
+        img = self.menubar_image() or self.symbol(name)
         if img is None:
             self.button.setTitle_("OS")     # 极端情况退回文字，至少看得见
             return
@@ -951,7 +992,10 @@ class TrayApp(Foundation.NSObject):
         bar = AppKit.NSStatusBar.systemStatusBar()
         self.item = bar.statusItemWithLength_(AppKit.NSVariableStatusItemLength)
         self.button = self.item.button()
-        self.button.setImage_(self.symbol("mic"))
+        mb = self.menubar_image()
+        self.button.setImage_(mb or self.symbol("mic"))
+        # 明说用的是哪个：资源缺失时是**静默**退回 SF Symbol 的，不报一句就没人发现
+        log("图标", "菜单栏图标：设计稿" if mb else "菜单栏图标：SF Symbol（assets 缺失，跑 packaging/make_icon.py 生成）")
         self.button.setImagePosition_(AppKit.NSImageLeading if hasattr(AppKit, "NSImageLeading") else 3)
         self.button.setTitle_(self.args.label)
         self.button.setToolTip_("VoxKey 语音输入：按住设备语音键说话")

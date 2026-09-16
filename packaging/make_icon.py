@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""生成 packaging/AppIcon.icns：圆角方块 + SF Symbol 的话筒。
+"""从设计稿 SVG 生成图标资源。
 
-为什么用脚本画、不塞一个 .icns 进仓库：图标要跟系统风格一致，SF Symbol 是现成的；
-而 .icns 是二进制，进仓库以后每改一次都得 diff 一堆字节。
+产出两样：
+1. `packaging/AppIcon.icns` —— App 图标（构建时用，不进仓库）
+2. `src/voxkey/assets/menubar.png` / `menubar@2x.png` —— 菜单栏图标（进仓库，运行时读）
+
+菜单栏那张为什么进仓库：它是**跑起来需要**的文件，不是中间产物。进仓库、再在冒烟里加一条
+「资产和设计稿对得上」的断言，就不会出现「改了 SVG 忘了重新生成」这种漂移。
 
 用法：.venv-build/bin/python packaging/make_icon.py
 """
@@ -14,81 +18,56 @@ import sys
 import tempfile
 from pathlib import Path
 
-import AppKit
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from render_svg import render          # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-OUT = HERE / "AppIcon.icns"
+ROOT = HERE.parent
+SVG = HERE / "app-icon.svg"
+ICNS = HERE / "AppIcon.icns"
+ASSETS = ROOT / "src" / "voxkey" / "assets"
 
-# iconset 要求的尺寸（文件名里的 1x/2x 由 iconutil 认）
+# iconset 要求的尺寸：(边长, 倍数)
 SPECS = [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2)]
 
-BG = (0.10, 0.11, 0.14, 1.0)      # 深色底：菜单栏图标是浅色的，App 图标给个对比
-GLYPH = "mic.fill"
+# 菜单栏图标：从设计稿里取「顶部那个大圆」（语音键的位置）。
+# 整张缩到 18pt 的话 9 单位的描边只剩 0.16 像素、糊成一片灰；只取这个圆再把描边加粗 2.5 倍，
+# @2x 下才够黑（实测均值 alpha 从 92 提到 170）。
+MENUBAR_CROP = (141, 339, 471, 471)
+MENUBAR_STROKE_SCALE = 2.5
+
+# 小尺寸下给描边兜底：线稿等比缩小后必然淡掉，至少别让它完全消失
+MIN_STROKE_PX = 0.9
 
 
-def _tint(sym, color, px: int):
-    """把符号染成指定颜色：先画出来，再用 sourceAtop 只覆盖有像素的地方。"""
-    out = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(px, px))
-    out.lockFocus()
-    sym.drawInRect_(AppKit.NSMakeRect(0, 0, px, px))
-    color.set()
-    AppKit.NSRectFillUsingOperation(AppKit.NSMakeRect(0, 0, px, px),
-                                    AppKit.NSCompositingOperationSourceAtop)
-    out.unlockFocus()
-    return out
-
-
-def render(px: int) -> bytes:
-    """画一张 px×px 的 PNG。"""
-    size = AppKit.NSMakeSize(px, px)
-    img = AppKit.NSImage.alloc().initWithSize_(size)
-    img.lockFocus()
-
-    radius = px * 0.225                     # 和 macOS 自己的圆角比例接近
-    path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-        AppKit.NSMakeRect(0, 0, px, px), radius, radius)
-    AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(*BG).set()
-    path.fill()
-
-    sym = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(GLYPH, None)
-    if sym is None:
-        raise SystemExit(f"系统里没有 SF Symbol「{GLYPH}」（macOS 11+ 才有）")
-    cfg = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_scale_(
-        px * 0.50, AppKit.NSFontWeightSemibold, 3)
-    sym = sym.imageWithSymbolConfiguration_(cfg)
-    # 话筒在方块里略偏上一点点（下面留出「杆」的视觉重量）
-    box = px * 0.56
-    rect = AppKit.NSMakeRect((px - box) / 2, (px - box) / 2 - px * 0.015, box, box)
-    tinted = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(px, px))
-    tinted.lockFocus()
-    sym.drawInRect_(rect)
-    AppKit.NSColor.whiteColor().set()
-    AppKit.NSRectFillUsingOperation(AppKit.NSMakeRect(0, 0, px, px),
-                                    AppKit.NSCompositingOperationSourceAtop)
-    tinted.unlockFocus()
-    tinted.drawInRect_(AppKit.NSMakeRect(0, 0, px, px))
-
-    img.unlockFocus()
-
-    rep = AppKit.NSBitmapImageRep.imageRepWithData_(img.TIFFRepresentation())
-    data = rep.representationUsingType_properties_(AppKit.NSBitmapImageFileTypePNG, {})
-    return bytes(data)
-
-
-def main() -> int:
+def build_icns() -> None:
     with tempfile.TemporaryDirectory() as td:
         iconset = Path(td) / "AppIcon.iconset"
         iconset.mkdir()
         for base, scale in SPECS:
             px = base * scale
             name = f"icon_{base}x{base}{'@2x' if scale == 2 else ''}.png"
-            (iconset / name).write_bytes(render(px))
-        r = subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(OUT)],
+            render(SVG, iconset / name, px, width=px, min_stroke_px=MIN_STROKE_PX)
+        r = subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(ICNS)],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            print(r.stderr.strip(), file=sys.stderr)
-            return r.returncode
-    print(f"{OUT}  {OUT.stat().st_size} 字节")
+            raise SystemExit(r.stderr.strip())
+    print(f"{ICNS.relative_to(ROOT)}  {ICNS.stat().st_size} 字节")
+
+
+def build_menubar() -> None:
+    for name, px in (("menubar.png", 18), ("menubar@2x.png", 36)):
+        out = ASSETS / name
+        render(SVG, out, px, width=px, template=True, crop=MENUBAR_CROP,
+               stroke_scale=MENUBAR_STROKE_SCALE)
+        print(f"{out.relative_to(ROOT)}  {px}x{px}  {out.stat().st_size} 字节")
+
+
+def main() -> int:
+    if not SVG.exists():
+        raise SystemExit(f"找不到设计稿 {SVG}")
+    build_icns()
+    build_menubar()
     return 0
 
 

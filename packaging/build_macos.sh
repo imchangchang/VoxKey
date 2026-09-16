@@ -44,7 +44,9 @@ fi
 BOOTSTRAP_PY="${VOXKEY_BOOTSTRAP_PYTHON:-$ROOT/.venv/bin/python}"
 [ -x "$BOOTSTRAP_PY" ] || BOOTSTRAP_PY="$(command -v python3)"
 if [ ! -x "$VENV/bin/pyinstaller" ]; then
-  echo "==> 建构建环境 $VENV（用 $BOOTSTRAP_PY）"
+  # 变量名一定要用 ${} 包起来：后面紧跟中文全角括号时，CI 上的 C locale 会把那些字节
+  # 当成变量名的一部分，报 "VENV（用: unbound variable"（本机 UTF-8 locale 下不复现）
+  echo "==> 建构建环境 ${VENV}（用 ${BOOTSTRAP_PY}）"
   "$BOOTSTRAP_PY" -m venv "$VENV"
   "$VENV/bin/python" -m pip install -q --upgrade pip
   "$VENV/bin/python" -m pip install -q -e '.[tools]' pyinstaller

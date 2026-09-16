@@ -26,6 +26,8 @@ datas = [
     # （portaudio-binaries/libportaudio.dylib），不在依赖图里。不收就会「找不到 libportaudio」，
     # 表现是能启动、一录音就崩。
     *collect_data_files("_sounddevice_data"),
+    # 菜单栏图标（从设计稿 SVG 生成的模板图，见 packaging/make_icon.py）
+    (str(ROOT / "src" / "voxkey" / "assets"), "voxkey/assets"),
 ]
 
 binaries = [

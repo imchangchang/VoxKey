@@ -675,6 +675,82 @@ def release_consistency() -> str:
     return f"资产名 {asset} 三处一致"
 
 
+def shell_var_before_cjk() -> str:
+    """shell 脚本里 `$VAR` 后面紧跟中文时必须写成 `${VAR}`。
+
+    CI 上的 locale 是 C，bash 会把变量名后面的多字节字节当成名字的一部分：
+    `echo "… $VENV（用 x）"` 直接报 `VENV（用: unbound variable` 退出。
+    本机 locale 是 UTF-8，同一个脚本一点问题没有——这类只在 CI 炸的坑，钉在这里。
+    """
+    import re
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    files = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True).stdout.split()
+    pat = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]")
+    bad = []
+    for f in files:
+        if not f.endswith((".sh", ".yml", ".yaml")):
+            continue
+        for i, line in enumerate((root / f).read_text(encoding="utf-8").splitlines(), 1):
+            if line.strip().startswith("#"):
+                continue
+            bad += [f"{f}:{i} 用了 {m.group(0)!r}（要写成 ${{…}}）" for m in pat.finditer(line)]
+    if bad:
+        raise AssertionError("；".join(bad[:4]))
+    return f"扫了 {len([f for f in files if f.endswith(('.sh', '.yml', '.yaml'))])} 个脚本，没有裸 $VAR 接中文"
+
+
+def icon_assets_fresh() -> str:
+    """菜单栏图标资源必须和设计稿对得上。
+
+    图标是「改了 SVG 忘了重新生成」的经典漂移点，而它不会报错——只会一直显示旧图标。
+    这里按同样的参数重画一遍做逐字节比较（AppKit 出 PNG 是稳定的，实测两次 sha256 一致）。
+    """
+    import importlib.util
+    import sys as _sys
+    import tempfile
+
+    root = Path(__file__).resolve().parent.parent
+    pkg = root / "packaging"
+    spec = importlib.util.spec_from_file_location("_vk_make_icon", pkg / "make_icon.py")
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules["_vk_make_icon"] = mod
+    spec.loader.exec_module(mod)                       # 里面有 sys.path.insert，能 import 到 render_svg
+
+    bad = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, px in (("menubar.png", 18), ("menubar@2x.png", 36)):
+            committed = root / "src" / "voxkey" / "assets" / name
+            if not committed.exists():
+                bad.append(f"{name} 不存在（跑 packaging/make_icon.py 生成）")
+                continue
+            tmp = Path(td) / name
+            mod.render(mod.SVG, tmp, px, width=px, template=True, crop=mod.MENUBAR_CROP,
+                       stroke_scale=mod.MENUBAR_STROKE_SCALE)
+            if tmp.read_bytes() != committed.read_bytes():
+                bad.append(f"{name} 和设计稿对不上（改了 SVG 就重新跑 packaging/make_icon.py）")
+    if bad:
+        raise AssertionError("；".join(bad))
+
+    # 光「文件对得上」不够：还要确认真的能加载成一张 18pt 的模板图。
+    # 菜单栏图标在没接通屏幕的机器上根本看不见，肉眼验不了。
+    from voxkey.app import load_menubar_image
+    img = load_menubar_image()
+    if img is None:
+        raise AssertionError("load_menubar_image() 返回 None（资源在但没加载成功）")
+    if not img.isTemplate():
+        raise AssertionError("菜单栏图不是模板图：不反色的话深色菜单栏下会看不见")
+    reps = img.representations()
+    sizes = sorted((r.pixelsWide(), r.pixelsHigh()) for r in reps)
+    if sizes != [(18, 18), (36, 36)]:
+        raise AssertionError(f"图标该有 18/36 两档像素密度，实得 {sizes}")
+    for r in reps:
+        if (r.size().width, r.size().height) != (18.0, 18.0):
+            raise AssertionError(f"表示图的点尺寸应为 18pt，实得 {r.size()}")
+    return f"与设计稿逐字节一致，且能加载成 18pt 模板图（{len(reps)} 档密度）"
+
+
 def cli_help(cmd: list[str]) -> str:
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
                        env={**os.environ, "PYTHONPATH": "src"})
@@ -703,6 +779,8 @@ def main() -> int:
     ok &= check("模型目录规则", model_dir_rules)
     ok &= check("首启下载模型全流程", model_download_flow)
     ok &= check("发版链路名字一致", release_consistency)
+    ok &= check("shell 变量不裸接中文", shell_var_before_cjk)
+    ok &= check("菜单栏图标与设计稿一致", icon_assets_fresh)
     ok &= check("悬浮条收起再显示", pill_show_hide)
     ok &= check("悬浮条淡出收起", pill_fade)
     ok &= check("悬浮条角标（版本/电量）", pill_meta)
