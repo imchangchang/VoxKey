@@ -1,7 +1,8 @@
 """模型注册表与加载：软件本体只认 funasr-nano-int8（离线），其余模型用于质量对比（tools/verify）。
 
-模型目录：环境变量 `VOXKEY_MODELS_DIR` 优先，否则用仓库根下的 `models/`（已被 .gitignore）。
-模型文件不在仓库里（每个 1~3GB），需要单独下载。
+模型目录：环境变量 `VOXKEY_MODELS_DIR` 优先，打包后是用户数据目录，源码运行时是仓库根下的
+`models/`。模型文件不在仓库里（每个 1~3GB），需要单独下载——软件本体用的那个由
+`voxkey.modeldl` 在首启时自动拉取，见那里的说明。
 """
 
 from __future__ import annotations
@@ -12,8 +13,9 @@ from pathlib import Path
 
 import sherpa_onnx
 
-_PKG_ROOT = Path(__file__).resolve().parents[2]
-MODELS = Path(os.environ.get("VOXKEY_MODELS_DIR") or (_PKG_ROOT / "models"))
+from .modeldl import default_models_dir
+
+MODELS = default_models_dir()
 
 
 def _pick(d: Path, *subs, avoid=("fp16",)) -> str:

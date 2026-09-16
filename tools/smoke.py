@@ -309,6 +309,7 @@ def pill_wanted_table() -> str:
     # (说明, 状态补丁, fault_age, 期望可见, auto, batt_age)
     cases = [
         ("空闲且一切正常 → 收起", {}, OLD, False, True, OLD),
+        ("首启下模型 → 出现（让用户看得见在下载）", {"phase": "setup"}, OLD, True, True, OLD),
         ("听写中 → 出现", {"phase": "rec"}, OLD, True, True, OLD),
         ("处理中 → 出现", {"phase": "proc"}, OLD, True, True, OLD),
         ("设备掉线 → 出现（指示没插入）", {"connected": False}, OLD, True, True, OLD),
@@ -520,6 +521,96 @@ def model_ok() -> str:
     return type(rec).__name__
 
 
+def model_download_flow() -> str:
+    """首启下模型的全流程：下载 → sha256 校验 → 解压 → 认得出装好了 → 清掉中间产物。
+
+    用 `file://` 当镜像、拿几百字节的假模型跑，不碰真的 800MB。假模型的目录名和必需文件
+    都按真模型的形状造，所以 `is_installed` 的判据也一并被验了。
+    """
+    import hashlib
+    import shutil
+    import tarfile
+    import tempfile
+    from voxkey import modeldl as M
+
+    tmp = Path(tempfile.mkdtemp())
+    seen: list[str] = []
+    try:
+        src = tmp / "src" / M.DIR_NAME
+        src.mkdir(parents=True)
+        for f in M.REQUIRED:
+            if "." in f:
+                (src / f).write_bytes(b"fake onnx")
+            else:
+                (src / f).mkdir()
+                (src / f / "tokenizer.json").write_bytes(b"{}")
+        mirror = tmp / "mirror"
+        mirror.mkdir()
+        tarball = mirror / M.TARBALL
+        with tarfile.open(tarball, "w:bz2") as tf:
+            tf.add(src, arcname=src.name)
+
+        real = (M.SIZE, M.SHA256)
+        M.SIZE, M.SHA256 = tarball.stat().st_size, hashlib.sha256(tarball.read_bytes()).hexdigest()
+        os.environ["VOXKEY_MODEL_MIRROR"] = mirror.as_uri()
+        models = tmp / "models"
+        try:
+            if M.is_installed(models):
+                raise AssertionError("空目录被判成「已装好」")
+            M.ensure(models_dir=models, on_progress=lambda s, d, t: seen.append(s))
+            if not M.is_installed(models):
+                raise AssertionError("ensure 跑完还是没认出模型")
+            if not seen:
+                raise AssertionError("一次进度回调都没有（用户会对着没反应的图标干等）")
+            if (models / M.TARBALL).exists():
+                raise AssertionError("装好后没删 tar.bz2（白占一份几百 MB）")
+            # 镜像内容不对必须当场失败，不能装上一个来路不明的模型
+            M.SHA256 = "0" * 64
+            try:
+                M.ensure(models_dir=tmp / "models2")
+            except M.ModelDownloadError:
+                pass
+            else:
+                raise AssertionError("sha256 不对却没报错")
+        finally:
+            M.SIZE, M.SHA256 = real
+            os.environ.pop("VOXKEY_MODEL_MIRROR", None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return f"假模型走通下载/校验/解压/清理，进度回调 {len(seen)} 次"
+
+
+def model_dir_rules() -> str:
+    """模型目录的选择规则：环境变量 > 打包后的用户数据目录 > 源码仓库 models/。"""
+    from voxkey import modeldl as M
+
+    old = os.environ.pop("VOXKEY_MODELS_DIR", None)
+    try:
+        import voxkey
+        repo_models = Path(voxkey.__file__).resolve().parents[2] / "models"
+        if M.default_models_dir() != repo_models:
+            raise AssertionError(f"源码运行时应指向 {repo_models}，实得 {M.default_models_dir()}")
+        os.environ["VOXKEY_MODELS_DIR"] = "~/somewhere-else"
+        if M.default_models_dir() != Path.home() / "somewhere-else":
+            raise AssertionError("VOXKEY_MODELS_DIR 没生效（也没展开 ~）")
+        os.environ.pop("VOXKEY_MODELS_DIR")
+        # 打包后必须离开 .app 包体：包是只读的，往里面写模型会毁掉签名
+        sys.frozen = True                                     # type: ignore[attr-defined]
+        try:
+            packed = M.default_models_dir()
+        finally:
+            del sys.frozen                                    # type: ignore[attr-defined]
+        if packed != M.app_data_dir() / "models":
+            raise AssertionError(f"打包后应指向用户数据目录，实得 {packed}")
+        if str(packed).startswith(str(repo_models.parent)):
+            raise AssertionError("打包后仍指向仓库/包体")
+    finally:
+        os.environ.pop("VOXKEY_MODELS_DIR", None)
+        if old is not None:
+            os.environ["VOXKEY_MODELS_DIR"] = old
+    return "环境变量 / 源码 / 打包三种情况都对"
+
+
 def cli_help(cmd: list[str]) -> str:
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
                        env={**os.environ, "PYTHONPATH": "src"})
@@ -544,6 +635,8 @@ def main() -> int:
     ok &= check("悬浮条显示规则", pill_wanted_table)
     ok &= check("收起前的收场提示", linger_rule)
     ok &= check("说话检测闸门", speech_gate)
+    ok &= check("模型目录规则", model_dir_rules)
+    ok &= check("首启下载模型全流程", model_download_flow)
     ok &= check("悬浮条收起再显示", pill_show_hide)
     ok &= check("悬浮条淡出收起", pill_fade)
     ok &= check("悬浮条角标（版本/电量）", pill_meta)

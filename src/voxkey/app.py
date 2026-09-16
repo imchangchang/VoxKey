@@ -52,6 +52,7 @@ from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, M
                                      MOD_OPT, DeviceKeyReader, find_keyboard_path)
 from voxkey.inject import Injector, ax_trusted, frontmost_info, reactivate
 from voxkey.models import load_recognizer
+from voxkey import modeldl
 from voxkey.pill import Pill
 from voxkey.transcribe import Decoder
 
@@ -60,6 +61,7 @@ LOCK_FILE = Path(tempfile.gettempdir()) / "voxkey.lock"
 SAMPLE_RATE = 16000
 
 PHASE_IDLE, PHASE_REC, PHASE_PROC, PHASE_ERR = "idle", "rec", "proc", "err"
+PHASE_SETUP = "setup"   # 首启准备模型（下载/解压）。单独一个态，别和「出错」混起来
 
 # 状态指示统一用「圆圈 + 文字」：
 #   ○ 空闲 → ● 听写中（按住） → ◐ 上屏中（松开后转写+注入，转圈动画） → ○ 空闲
@@ -82,6 +84,7 @@ BATTERY_FRESH_S = 120.0 # 电量/充电读数多久算新鲜（只在按键时�
 LINGER_S = 1.2          # 悬浮条收起之前，先把「收场状态」显示这么久（用户要求：消失前要有对应交互）
 PHASE_META = {
     PHASE_IDLE: ("circle", None, "空闲", "○"),
+    PHASE_SETUP: ("arrow.down.circle", (0.30, 0.55, 1.00, 1.0), "准备模型", "↓"),
     PHASE_REC: ("circle.fill", (1.00, 0.30, 0.30, 1.0), "听写中", "●"),
     PHASE_PROC: ("circle.dotted", (0.30, 0.55, 1.00, 1.0), "处理中", "◐"),
     PHASE_ERR: ("exclamationmark.circle", (1.00, 0.60, 0.10, 1.0), "未上屏", "○"),
@@ -120,7 +123,7 @@ def pill_wanted(st: dict, fault_age: float, battery_age: float = 1e9,
         return False
     fresh_charging = st["battery_charging"] and battery_age < BATTERY_FRESH_S
     return bool(
-        st["phase"] in (PHASE_REC, PHASE_PROC)
+        st["phase"] in (PHASE_SETUP, PHASE_REC, PHASE_PROC)   # 首启下模型 / 听写中 / 上屏中
         or st["phase"] == PHASE_ERR                         # 模型加载失败、麦克风打不开
         or st["paused"]                                     # 用户主动停了监听，得让人看见
         or st["connected"] in (False, None)                 # 设备掉线 / 还在探测
@@ -614,9 +617,18 @@ class TrayApp(Foundation.NSObject):
             self.self_check_visibility()
 
         st = self.get_state()
-        phase = PHASE_ERR if (st["paused"] or st["connected"] is False) else st["phase"]
+        # 首启准备模型（下载/解压）优先显示：这是阻塞性的准备步骤，用户按语音键之前只能等它，
+        # 所以设备/暂停那几条提示这期间先让位——否则设备还没就绪时会显示成「设备未连接」，
+        # 用户完全看不到模型正在下。
+        setup = st["phase"] == PHASE_SETUP
+        if setup:
+            phase = PHASE_SETUP
+        else:
+            phase = PHASE_ERR if (st["paused"] or st["connected"] is False) else st["phase"]
         sf, tint, label, glyph = PHASE_META[phase]
-        if st["paused"]:
+        if setup:
+            pass
+        elif st["paused"]:
             label, glyph = "已暂停", "○"
         elif st["device_off"]:
             # 厂商通道沉默。实测（静置 7 分钟、一个厂商帧都不发）：设备 300 秒不用就进待机，
@@ -690,6 +702,11 @@ class TrayApp(Foundation.NSObject):
                 lead, color = Pill.LEAD_WAVE, RED
                 # 不在这里截断：能放多少行由 pill 按实际行高决定（放不下就显示最近的尾巴），
                 # 以前这里硬切 [:60]（正好两行），长语音说到两行就再也不长了。
+            elif phase == PHASE_SETUP:
+                # 首启在下模型：标题是「准备模型」，进度写在 reason 里、走下面那行内容行。
+                # 放在「设备连接中…」前面——准备模型期间这条最要紧。
+                color = BLUE
+                detail = (st["reason"].partition("：")[2].strip() or None)
             elif st["connected"] is None:
                 # 句柄拿到了但设备还没证明自己能发按键：这时候提示不能消失，
                 # 否则用户以为能用了，按下去却什么都没发生（见 _device_ready）
@@ -991,6 +1008,35 @@ class TrayApp(Foundation.NSObject):
         log("就绪", "按住设备语音键说话，松手上屏；菜单栏图标里可暂停/退出。")
 
     @objc.python_method
+    def _ensure_model(self) -> None:
+        """首启把模型下下来。已经装好就立刻返回。
+
+        进度写进 state["reason"]（悬浮条的内容行 + 菜单状态行都读它），这样用户按语音键之前
+        就能看见「在下载」而不是面对一个没反应的图标。下载是 800MB 级别，必须有反馈。
+        """
+        if modeldl.is_installed():
+            return
+        last = {"t": 0.0}
+
+        def on_progress(stage: str, done: int, total: int) -> None:
+            now = time.monotonic()
+            if done < total and now - last["t"] < 0.5:     # 限流：日志和状态都别刷屏
+                return
+            last["t"] = now
+            if stage == "download":
+                pct = done * 100 // total if total else 0
+                text = f"下载模型：{pct}%（{done / 1e6:.0f} / {total / 1e6:.0f} MB）"
+            else:
+                text = f"解压模型：第 {done} 个文件" if done else "解压模型：准备中…"
+            self.set_state(reason=text)
+            log("模型", text)
+
+        log("模型", f"模型未下载，开始拉取（约 {modeldl.SIZE / 1e9:.2f}GB）→ {modeldl.model_path()}")
+        modeldl.ensure(allow_download=not self.args.no_model_download, on_progress=on_progress)
+        self.set_state(reason="")
+        log("模型", "模型已就绪")
+
+    @objc.python_method
     def run(self) -> None:
         # 实例必须存下来：写成 SingleInstance().acquire() 的话临时对象当场被回收、
         # 文件句柄一关 flock 就释放了，锁活不过一次函数调用，第二个实例照样能起。
@@ -1012,8 +1058,10 @@ class TrayApp(Foundation.NSObject):
         print(f"麦克风   : {name}", flush=True)
 
         def load_model():
-            self.set_state(phase=PHASE_PROC)
+            self.set_state(phase=PHASE_PROC if modeldl.is_installed() else PHASE_SETUP)
             try:
+                self._ensure_model()
+                self.set_state(phase=PHASE_PROC)
                 self.decoder = Decoder(load_recognizer(self.args.model),
                                        max_segment_s=self.args.segment_s)
                 self.set_state(phase=PHASE_IDLE)
@@ -1041,6 +1089,8 @@ def main() -> int:
     ap.add_argument("--segment-s", type=float, default=22.0, help="长语音切段长度（秒）")
 
     ap.add_argument("--no-device", action="store_true", help="不读按键（菜单手动开始/结束）")
+    ap.add_argument("--no-model-download", action="store_true",
+                    help="模型没下载时不自动拉取，直接把路径报出来（离线/自己放模型时用）")
     ap.add_argument("--label", default="VoxKey", help="图标旁的文字（空串=不显示，默认 VoxKey）")
     ap.add_argument("--save-audio", metavar="DIR", default=None,
                     help="每次按键的音频都存成 wav + 一行索引（排查丢音频用）")
