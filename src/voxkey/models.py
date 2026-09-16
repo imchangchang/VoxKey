@@ -13,7 +13,7 @@ from pathlib import Path
 
 import sherpa_onnx
 
-from .modeldl import default_models_dir
+from .paths import default_models_dir
 
 MODELS = default_models_dir()
 

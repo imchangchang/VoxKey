@@ -46,7 +46,7 @@ from voxkey.audio import (SPEECH_MIN_PEAK, SPEECH_MIN_SEC, Recorder, find_input_
 from voxkey.device import protocol as P
 from voxkey.device.device import VibeKey
 from voxkey.devicewatch import DeviceState, DeviceWatch
-from voxkey.logging import log
+from voxkey.logging import log, log_target
 from voxkey.state import State
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, MOD_CTRL,
                                      MOD_OPT, DeviceKeyReader, find_keyboard_path)
@@ -1049,6 +1049,7 @@ class TrayApp(Foundation.NSObject):
         st = self.get_state()
         log("权限", f"麦克风 {'已授权' if st['mic_ok'] else '未授权（采不到音）'}，"
                     f"辅助功能 {'已授权' if st['post_ok'] else '未授权（写不进输入框）'}")
+        log("日志", f"日志位置：{log_target()}")
 
         self.audio_device = find_input_device(self.args.device)
         try:

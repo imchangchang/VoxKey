@@ -581,34 +581,67 @@ def model_download_flow() -> str:
 
 
 def model_dir_rules() -> str:
-    """模型目录的选择规则：环境变量 > 打包后的用户数据目录 > 源码仓库 models/。"""
-    from voxkey import modeldl as M
+    """运行期路径的规则：环境变量 > 打包后的用户目录 > 源码仓库。"""
+    from voxkey import paths
 
     old = os.environ.pop("VOXKEY_MODELS_DIR", None)
     try:
         import voxkey
         repo_models = Path(voxkey.__file__).resolve().parents[2] / "models"
-        if M.default_models_dir() != repo_models:
-            raise AssertionError(f"源码运行时应指向 {repo_models}，实得 {M.default_models_dir()}")
+        if paths.default_models_dir() != repo_models:
+            raise AssertionError(f"源码运行时应指向 {repo_models}，实得 {paths.default_models_dir()}")
         os.environ["VOXKEY_MODELS_DIR"] = "~/somewhere-else"
-        if M.default_models_dir() != Path.home() / "somewhere-else":
+        if paths.default_models_dir() != Path.home() / "somewhere-else":
             raise AssertionError("VOXKEY_MODELS_DIR 没生效（也没展开 ~）")
         os.environ.pop("VOXKEY_MODELS_DIR")
         # 打包后必须离开 .app 包体：包是只读的，往里面写模型会毁掉签名
         sys.frozen = True                                     # type: ignore[attr-defined]
         try:
-            packed = M.default_models_dir()
+            packed = paths.default_models_dir()
         finally:
             del sys.frozen                                    # type: ignore[attr-defined]
-        if packed != M.app_data_dir() / "models":
+        if packed != paths.app_data_dir() / "models":
             raise AssertionError(f"打包后应指向用户数据目录，实得 {packed}")
         if str(packed).startswith(str(repo_models.parent)):
             raise AssertionError("打包后仍指向仓库/包体")
+        # 日志也不能落进包体
+        if str(paths.app_log_dir()).startswith(str(repo_models.parent)):
+            raise AssertionError(f"日志目录落在仓库里了：{paths.app_log_dir()}")
     finally:
         os.environ.pop("VOXKEY_MODELS_DIR", None)
         if old is not None:
             os.environ["VOXKEY_MODELS_DIR"] = old
     return "环境变量 / 源码 / 打包三种情况都对"
+
+
+def log_survives_bad_path() -> str:
+    """日志目录写不了时不能把程序搞崩。
+
+    打包成 .app 之后日志走文件，而这是启动路径上的东西：用户家目录只读、磁盘满、
+    Logs 被占成一个文件……任何一种都不该让一个语音输入软件打不开。这里把日志目录
+    指到一个建不出来的地方，验证它会退到临时目录、且一行都不抛出来。
+    """
+    from voxkey import logging as L
+
+    old_env = os.environ.get("VOXKEY_LOG_DIR")
+    saved_file = L._file
+    os.environ["VOXKEY_LOG_DIR"] = "/dev/null/cannot-exist"
+    L._file = None
+    sys.frozen = True                                     # type: ignore[attr-defined]
+    try:
+        L.log("测试", "日志目录不可写时这一行也得打出去，而且不能抛异常")
+        where = L._file_sink().name
+        if where.startswith("/dev/null"):
+            raise AssertionError(f"没有退回可写的位置：{where}")
+        if not Path(where).exists():
+            raise AssertionError(f"日志文件没真的建出来：{where}")
+    finally:
+        del sys.frozen                                    # type: ignore[attr-defined]
+        L._file = saved_file
+        os.environ.pop("VOXKEY_LOG_DIR", None)
+        if old_env is not None:
+            os.environ["VOXKEY_LOG_DIR"] = old_env
+    return f"退回到 {where}"
 
 
 def cli_help(cmd: list[str]) -> str:
@@ -627,6 +660,7 @@ def main() -> int:
     ok = True
     ok &= check("包导入", imports_ok)
     ok &= check("日志多线程不串行", log_lines_not_interleaved)
+    ok &= check("日志目录不可写也不崩", log_survives_bad_path)
     ok &= check("结构约定（线程 args/元组）", structure_rules)
     ok &= check("pipeline 解码器现取", pipeline_decoder_source)
     ok &= check("按键回调异常不杀线程", key_callback_survives)

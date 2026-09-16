@@ -17,13 +17,14 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import sys
 import tarfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable
+
+from .paths import default_models_dir
 
 # ---------------------------------------------------------------- 常量
 
@@ -47,31 +48,6 @@ class ModelDownloadError(RuntimeError):
 
 
 # ---------------------------------------------------------------- 目录
-
-def app_data_dir() -> Path:
-    """用户数据目录（模型放这儿，不能放进 .app 包里——包是只读的、签名后更不许改）。"""
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "VoxKey"
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
-        return Path(base) / "VoxKey"
-    base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
-    return Path(base) / "VoxKey"
-
-
-def default_models_dir() -> Path:
-    """模型目录：环境变量优先 > 打包后用户数据目录 > 源码仓库根下的 models/。
-
-    打包后必须换地方：PyInstaller 把 `voxkey` 解到 .app 内部，`__file__` 往上两级也在包体内，
-    往那儿写模型既占包体又会在签名校验时出问题（Gatekeeper 认签名，包内容一变就废）。
-    """
-    env = os.environ.get("VOXKEY_MODELS_DIR")
-    if env:
-        return Path(env).expanduser()
-    if getattr(sys, "frozen", False):
-        return app_data_dir() / "models"
-    return Path(__file__).resolve().parents[2] / "models"
-
 
 def model_path(models_dir: Path | None = None) -> Path:
     return (models_dir or default_models_dir()) / DIR_NAME
