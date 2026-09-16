@@ -726,14 +726,13 @@ def icon_assets_fresh() -> str:
                 bad.append(f"{name} 不存在（跑 packaging/make_icon.py 生成）")
                 continue
             tmp = Path(td) / name
-            mod.render(mod.SVG, tmp, px, width=px, template=True, crop=mod.MENUBAR_CROP,
-                       stroke_scale=mod.MENUBAR_STROKE_SCALE)
+            mod.render(mod.SVG, tmp, px, template=True, min_stroke_px=mod.MENUBAR_MIN_STROKE_PX)
             if tmp.read_bytes() != committed.read_bytes():
                 bad.append(f"{name} 和设计稿对不上（改了 SVG 就重新跑 packaging/make_icon.py）")
     if bad:
         raise AssertionError("；".join(bad))
 
-    # 光「文件对得上」不够：还要确认真的能加载成一张 18pt 的模板图。
+    # 光「文件对得上」不够：还要确认真的能加载成 18pt 高的模板图。
     # 菜单栏图标在没接通屏幕的机器上根本看不见，肉眼验不了。
     from voxkey.app import load_menubar_image
     img = load_menubar_image()
@@ -742,13 +741,16 @@ def icon_assets_fresh() -> str:
     if not img.isTemplate():
         raise AssertionError("菜单栏图不是模板图：不反色的话深色菜单栏下会看不见")
     reps = img.representations()
+    # 设计稿是 768×2048 的竖构图，18pt 高时宽度只有 7pt 左右——断言的是「高度 18pt、
+    # 宽度按原稿比例」，不是方图。@1x/@2x 各一份，宽度按 768:2048 折出来。
+    want = sorted(((round(18 * 768 / 2048), 18), (round(36 * 768 / 2048), 36)))
     sizes = sorted((r.pixelsWide(), r.pixelsHigh()) for r in reps)
-    if sizes != [(18, 18), (36, 36)]:
-        raise AssertionError(f"图标该有 18/36 两档像素密度，实得 {sizes}")
+    if sizes != want:
+        raise AssertionError(f"图标该是 {want}（18pt 高、按设计稿比例），实得 {sizes}")
     for r in reps:
         if (r.size().width, r.size().height) != (18.0, 18.0):
-            raise AssertionError(f"表示图的点尺寸应为 18pt，实得 {r.size()}")
-    return f"与设计稿逐字节一致，且能加载成 18pt 模板图（{len(reps)} 档密度）"
+            raise AssertionError(f"表示图的点尺寸应为 18pt 高，实得 {r.size()}")
+    return f"与设计稿逐字节一致，且能加载成模板图（{len(reps)} 档密度，{sizes[-1][0]}×{sizes[-1][1]} 像素那档）"
 
 
 def cli_help(cmd: list[str]) -> str:

@@ -96,19 +96,22 @@ def _color(name: str | None, fallback_black=True):
 def render(svg_path: Path, out_png: Path, height: int, template: bool = False,
            stroke_scale: float = 1.0, width: int | None = None,
            crop: tuple[float, float, float, float] | None = None,
-           min_stroke_px: float = 0.0) -> tuple[int, int]:
+           min_stroke_px: float = 0.0, skip: set[int] | None = None) -> tuple[int, int]:
     """渲染成 PNG。
 
     height/width 给的是画布像素尺寸；图形按 viewBox 等比缩放后**居中**放进去。
-    crop=(x, y, w, h) 用设计稿自己的坐标系裁一块出来渲染——状态栏图就是从整张稿子里
-    取「顶部那个大圆」来的，尺寸按裁出来的那块算。
+    crop=(x, y, w, h) 用设计稿自己的坐标系裁一块出来渲染，尺寸按裁出来的那块算。
+    skip 是「不画的图元序号」（按解析顺序从 0 数）——做菜单栏那种十几像素的图时，
+    设计稿里的细节（一排小键、下面的屏幕）缩下去只会糊成灰块，不如按序号剔掉。
     template=True 时丢掉背景填充，所有笔迹一律画成黑色——macOS 的模板图靠 alpha 取形，
     系统会自己按菜单栏明暗反色。
-    min_stroke_px 给描边兜底：设计稿是线稿，等比缩到 32px 时 9 单位的描边只剩 0.14 像素，
-    整张图会淡成一片灰。设一个下限（比如 0.9）让线至少看得见——代价是小尺寸下细节会糊在一起，
+    min_stroke_px 给描边兜底：设计稿是线稿，等比缩到十几像素时 9 单位的描边只剩零点几像素，
+    整张图会淡成一片灰。设一个下限让线至少看得见——代价是小尺寸下细节会糊在一起，
     这是线稿做图标的固有问题，不是这里的 bug。
     """
     vw, vh, shapes = parse(svg_path)
+    if skip:
+        shapes = [s for i, s in enumerate(shapes) if i not in skip]
     if crop:
         cx, cy, cw, ch = crop
         if cx or cy:
@@ -190,12 +193,24 @@ def main() -> int:
                     help="描边加粗倍数（小尺寸下线条太细时用）")
     ap.add_argument("--min-stroke-px", type=float, default=0.0,
                     help="描边像素下限：线稿等比缩小后会淡成灰，给个下限兜底")
+    ap.add_argument("--skip", default=None,
+                    help="不画的图元序号，如 3-14 或 3,4,5（按解析顺序从 0 数）")
     ap.add_argument("--crop", metavar="x,y,w,h", default=None,
                     help="按设计稿坐标系裁一块出来渲染（状态栏图取顶部大圆用）")
     a = ap.parse_args()
     crop = tuple(float(v) for v in a.crop.split(",")) if a.crop else None
+    skip: set[int] = set()
+    for part in (a.skip or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-")
+            skip |= set(range(int(lo), int(hi) + 1))
+        else:
+            skip.add(int(part))
     w, h = render(a.src, a.out, a.height, a.template, a.stroke_scale, a.width, crop,
-                  a.min_stroke_px)
+                  a.min_stroke_px, skip or None)
     print(f"{a.out}  {w}x{h}  {a.out.stat().st_size} 字节")
     return 0
 

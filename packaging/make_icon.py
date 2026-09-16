@@ -30,11 +30,15 @@ ASSETS = ROOT / "src" / "voxkey" / "assets"
 # iconset 要求的尺寸：(边长, 倍数)
 SPECS = [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2)]
 
-# 菜单栏图标：从设计稿里取「顶部那个大圆」（语音键的位置）。
-# 整张缩到 18pt 的话 9 单位的描边只剩 0.16 像素、糊成一片灰；只取这个圆再把描边加粗 2.5 倍，
-# @2x 下才够黑（实测均值 alpha 从 92 提到 170）。
-MENUBAR_CROP = (141, 339, 471, 471)
-MENUBAR_STROKE_SCALE = 2.5
+# 菜单栏图标：**整张设计稿等比缩小**（用户要求「整个图标完整显示」，不裁不剔）。
+#
+# 代价得说清楚：设计稿是 768×2048 的竖构图，18pt 高时宽度只有约 6.8pt（@2x 也就 14px），
+# 稿子里十几个图元在这个尺寸下**都是亚像素的**。实测（@2x，36px 高）：
+#   描边不兜底 → 均值 alpha 99、实心 0%，整张糊成一片灰
+#   兜到 1.0px  → 72% 的像素被墨盖住，并成一块
+#   兜到 0.8px  → 均值 alpha 154、实心 23.6%，还看得出是线稿（取这档）
+MENUBAR_MIN_STROKE_PX = 0.8
+MENUBAR_HEIGHT_PT = 18          # 菜单栏图标惯例高度
 
 # 小尺寸下给描边兜底：线稿等比缩小后必然淡掉，至少别让它完全消失
 MIN_STROKE_PX = 0.9
@@ -56,11 +60,14 @@ def build_icns() -> None:
 
 
 def build_menubar() -> None:
-    for name, px in (("menubar.png", 18), ("menubar@2x.png", 36)):
+    """菜单栏图：整张稿子等比缩小，@1x 和 @2x 各一份，都是模板图。"""
+    sizes = []
+    for name, px in (("menubar.png", MENUBAR_HEIGHT_PT), ("menubar@2x.png", MENUBAR_HEIGHT_PT * 2)):
         out = ASSETS / name
-        render(SVG, out, px, width=px, template=True, crop=MENUBAR_CROP,
-               stroke_scale=MENUBAR_STROKE_SCALE)
-        print(f"{out.relative_to(ROOT)}  {px}x{px}  {out.stat().st_size} 字节")
+        render(SVG, out, px, template=True, min_stroke_px=MENUBAR_MIN_STROKE_PX)
+        sizes.append(f"{px}x{round(px * 768 / 2048)}")
+        print(f"{out.relative_to(ROOT)}  {out.stat().st_size} 字节")
+    print(f"  像素尺寸：{'、'.join(sizes)}（18pt 高时约 7pt 宽——竖构图缩到菜单栏就这么窄）")
 
 
 def main() -> int:
