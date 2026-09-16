@@ -18,7 +18,7 @@ ROOT = Path(SPECPATH).parent          # SPECPATH = packaging/
 # 版本号：CI 从 tag 传进来（v0.1.0 → 0.1.0），本地构建就用这里的默认值。
 # 发版时记得和 pyproject.toml 的 version 一起改。
 VERSION = os.environ.get("VOXKEY_VERSION") or "0.1.0"
-BUNDLE_ID = "com.imchangchang.voxkey"
+BUNDLE_ID = "com.cgeng.voxkey"
 ICON = ROOT / "packaging" / "AppIcon.icns"
 
 datas = [
