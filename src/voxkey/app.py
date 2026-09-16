@@ -829,11 +829,22 @@ class TrayApp(Foundation.NSObject):
             return
         self.button.setTitle_(self.args.label)
         self.button.setImage_(img)
-        try:
-            self.button.setContentTintColor_(
-                AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(*tint) if tint else None)
-        except Exception:
-            pass
+        # **绝对不要碰 contentTintColor**（哪怕只是传 None）。
+        #
+        # 这是 AppKit 从 macOS 11 起就有的 bug，苹果自己的反馈单里记着（FB8530353，2020-08-25
+        # 提的，状态 Open）：
+        #   "if you set statusBarItem.button!.contentTintColor = .systemPink (any color) on
+        #    NSStatusBarButton, the color shown in the menu bar is just black no matter what
+        #    color you set. This is a big regression... This worked fine on macOS 10.15."
+        # 也就是说：**只要在这个按钮上设过 contentTintColor，图标就永远画成黑色**，而且之后
+        # 传 None 也救不回来——按钮已经被带进"按 tint 渲染"的路子了。
+        #
+        # 真踩过：启动时 phase 是 proc（tint=蓝色）先设了一次图标，之后整个进程的菜单栏图标
+        # 就一直是黑的，深色浅色菜单栏都不跟随，旁边系统的图标都是白的。
+        #
+        # 代价：菜单栏图标不再用颜色区分状态。状态本来就另有表达——图标形状随 phase 变
+        # （见 PHASE_META 的 SF Symbol），悬浮条和下拉菜单里都有文字说明。
+        # 颜色永远交给系统按菜单栏明暗自动反色，这也是 Apple HIG 要求模板图的做法。
 
     @objc.python_method
     def _recheck_permissions(self) -> None:
