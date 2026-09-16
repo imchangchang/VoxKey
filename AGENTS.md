@@ -24,9 +24,12 @@ packaging/build_macos.sh                                # 出 .app + 分发包�
 ```
 
 - 模型不进仓库：源码运行默认放 `models/`，或 `VOXKEY_MODELS_DIR` 指到别处；
-  **打包后由首启自动下载**（`src/voxkey/modeldl.py`）到 `~/Library/Application Support/VoxKey/models`
-- 要写盘的东西（模型、日志）一律走 `src/voxkey/paths.py`：打包后 `__file__` 在只读的 .app 包体里，
-  不能再拿它推目录
+  **打包后是便携布局**——模型和日志落在 `VoxKey.app` **旁边**的文件夹里
+  （`models/`、`logs/`），卸载就是删文件夹，不在 `~/Library` 留东西。
+  **别想着写进 .app 里面**：包体是签名封死的，写进去签名立刻失效（实测 codesign 报
+  "a sealed resource is missing or invalid"）。
+- 要写盘的东西（模型、日志）一律走 `src/voxkey/paths.py`；便携目录不可写时（用户只把 .app
+  拖进了 /Applications）它会退回 `~/Library`，日志里会说明
 - `tools/smoke.py` 覆盖：包导入、悬浮条四态几何断言（内容在裁剪层内且居中）、模型加载、
   首启下载全流程、发版资产名一致性、四个 CLI 入口 `--help`。改动 UI/布局/依赖后必须跑，
   **别用「看起来差不多」验收数值问题**

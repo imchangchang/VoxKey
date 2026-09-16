@@ -583,37 +583,64 @@ def model_download_flow() -> str:
 
 
 def model_dir_rules() -> str:
-    """运行期路径的规则：环境变量 > 打包后的用户目录 > 源码仓库。"""
+    """运行期路径规则：环境变量 > 便携目录（.app 旁边的文件夹）> 系统用户目录 > 源码仓库。
+
+    便携这条是重点：模型和日志要落在 **VoxKey.app 旁边的文件夹**里，卸载就是删文件夹。
+    不能放进 .app 内部——包体是签名封死的，写进去签名立刻失效（实测 codesign 报
+    "a sealed resource is missing or invalid"）。
+    """
+    import tempfile
     from voxkey import paths
 
-    old = os.environ.pop("VOXKEY_MODELS_DIR", None)
+    old_env = os.environ.pop("VOXKEY_MODELS_DIR", None)
+    old_exe = sys.executable
     try:
         import voxkey
         repo_models = Path(voxkey.__file__).resolve().parents[2] / "models"
         if paths.default_models_dir() != repo_models:
             raise AssertionError(f"源码运行时应指向 {repo_models}，实得 {paths.default_models_dir()}")
+
         os.environ["VOXKEY_MODELS_DIR"] = "~/somewhere-else"
         if paths.default_models_dir() != Path.home() / "somewhere-else":
             raise AssertionError("VOXKEY_MODELS_DIR 没生效（也没展开 ~）")
         os.environ.pop("VOXKEY_MODELS_DIR")
-        # 打包后必须离开 .app 包体：包是只读的，往里面写模型会毁掉签名
-        sys.frozen = True                                     # type: ignore[attr-defined]
-        try:
-            packed = paths.default_models_dir()
-        finally:
-            del sys.frozen                                    # type: ignore[attr-defined]
-        if packed != paths.app_data_dir() / "models":
-            raise AssertionError(f"打包后应指向用户数据目录，实得 {packed}")
-        if str(packed).startswith(str(repo_models.parent)):
-            raise AssertionError("打包后仍指向仓库/包体")
-        # 日志也不能落进包体
-        if str(paths.app_log_dir()).startswith(str(repo_models.parent)):
-            raise AssertionError(f"日志目录落在仓库里了：{paths.app_log_dir()}")
+
+        # 便携布局：<目录>/VoxKey.app/Contents/MacOS/VoxKey → 根目录就是 <目录>
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td) / "VoxKey"
+            macos = folder / "VoxKey.app" / "Contents" / "MacOS"
+            macos.mkdir(parents=True)
+            fake_exe = macos / "VoxKey"
+            fake_exe.touch()
+            sys.frozen = True                                   # type: ignore[attr-defined]
+            sys.executable = str(fake_exe)
+            try:
+                # 比较 resolve()：macOS 上 /var 是 /private/var 的软链，
+                # paths 那边会 resolve，不归一化就会误判成「路径不对」
+                got = paths.default_models_dir()
+                if got.resolve() != (folder / "models").resolve():
+                    raise AssertionError(f"便携布局下模型该在 {folder/'models'}，实得 {got}")
+                logs = paths.app_log_dir()
+                if logs.resolve() != (folder / "logs").resolve():
+                    raise AssertionError(f"便携布局下日志该在 {folder/'logs'}，实得 {logs}")
+                if not paths.uses_portable_layout():
+                    raise AssertionError("uses_portable_layout() 应为 True")
+                # 兜底：根目录不可写（用户只把 .app 拖进了 /Applications）
+                folder.chmod(0o500)
+                try:
+                    if paths.default_models_dir() != paths.app_data_dir() / "models":  # noqa: E501
+                        raise AssertionError("不可写时该退回系统用户目录")
+                finally:
+                    folder.chmod(0o700)
+            finally:
+                del sys.frozen                                   # type: ignore[attr-defined]
+                sys.executable = old_exe
     finally:
         os.environ.pop("VOXKEY_MODELS_DIR", None)
-        if old is not None:
-            os.environ["VOXKEY_MODELS_DIR"] = old
-    return "环境变量 / 源码 / 打包三种情况都对"
+        if old_env is not None:
+            os.environ["VOXKEY_MODELS_DIR"] = old_env
+        sys.executable = old_exe
+    return "源码 / 环境变量 / 便携 / 不可写兜底 四种情况都对"
 
 
 def log_survives_bad_path() -> str:
@@ -646,6 +673,7 @@ def log_survives_bad_path() -> str:
     return f"退回到 {where}"
 
 
+
 def release_consistency() -> str:
     """发版链路里的名字必须对得上：CI 的资产名、构建脚本产出的压缩包、静态页的下载链接。
 
@@ -675,6 +703,7 @@ def release_consistency() -> str:
     if "VOXKEY_VERSION" not in spec:
         raise AssertionError("spec 没读 VOXKEY_VERSION，CI 传的 tag 版本号进不去")
     return f"资产名 {asset} 三处一致"
+
 
 
 def shell_var_before_cjk() -> str:
@@ -734,7 +763,7 @@ def icon_assets_fresh() -> str:
     if bad:
         raise AssertionError("；".join(bad))
 
-    # 光「文件对得上」不够：还要确认真的能加载成 18pt 高的模板图。
+    # 光「文件对得上」不够：还要确认真的能加载成一张**不变形**的模板图。
     # 菜单栏图标在没接通屏幕的机器上根本看不见，肉眼验不了。
     from voxkey.app import load_menubar_image
     img = load_menubar_image()
@@ -743,16 +772,23 @@ def icon_assets_fresh() -> str:
     if not img.isTemplate():
         raise AssertionError("菜单栏图不是模板图：不反色的话深色菜单栏下会看不见")
     reps = img.representations()
-    # 设计稿是 768×2048 的竖构图，18pt 高时宽度只有 7pt 左右——断言的是「高度 18pt、
-    # 宽度按原稿比例」，不是方图。@1x/@2x 各一份，宽度按 768:2048 折出来。
-    want = sorted(((round(18 * 768 / 2048), 18), (round(36 * 768 / 2048), 36)))
-    sizes = sorted((r.pixelsWide(), r.pixelsHigh()) for r in reps)
-    if sizes != want:
-        raise AssertionError(f"图标该是 {want}（18pt 高、按设计稿比例），实得 {sizes}")
+    if not reps:
+        raise AssertionError("图标一个表示图都没有")
+    # 设计稿是 768×2048 的竖构图，18pt 高时宽只有 7pt 左右。
+    # **点尺寸的宽高比必须和位图一致**——写成 18×18 的方图，AppKit 会把竖图横向拉满：
+    # 实测被拉伸 2.73 倍（真踩过，用户看到的就是「压缩变形」的图标）。
     for r in reps:
-        if (r.size().width, r.size().height) != (18.0, 18.0):
-            raise AssertionError(f"表示图的点尺寸应为 18pt 高，实得 {r.size()}")
-    return f"与设计稿逐字节一致，且能加载成模板图（{len(reps)} 档密度，{sizes[-1][0]}×{sizes[-1][1]} 像素那档）"
+        px_ar = r.pixelsWide() / r.pixelsHigh()
+        pt = r.size()
+        if abs((pt.width / pt.height) / px_ar - 1) > 0.06:
+            raise AssertionError(
+                f"{r.pixelsWide()}x{r.pixelsHigh()} 像素被声明成 {pt.width:.1f}x{pt.height:.1f}pt，"
+                f"宽高比 {px_ar:.3f} → {pt.width / pt.height:.3f}，会被拉变形")
+        if abs(pt.height - 18.0) > 0.01:
+            raise AssertionError(f"图标高度应为 18pt，实得 {pt.height}")
+    sizes = sorted((r.pixelsWide(), r.pixelsHigh()) for r in reps)
+    return (f"与设计稿逐字节一致、是模板图，点尺寸与像素同比例（不变形）"
+            f"——{len(reps)} 档密度，最大 {sizes[-1][0]}×{sizes[-1][1]} 像素")
 
 
 def input_monitoring_probe() -> str:

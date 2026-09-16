@@ -95,13 +95,15 @@ PHASE_META = {
 def load_menubar_image():
     """读菜单栏图标（模板图）。资源不在就返回 None，调用方退回 SF Symbol。
 
-    两种像素密度都声明成 18pt：18px 是 @1x、36px 是 @2x，系统自己挑合适的那张。
+    **点尺寸必须保持位图自己的宽高比**：设计稿是竖构图（768×2048），缩到 18pt 高时宽度
+    只有 7pt。要是把点尺寸写成 18×18 的方图，AppKit 会把它横向拉满——实测被拉伸 2.73 倍，
+    整个图标变形。所以这里按「高 18pt、宽按位图比例」来声明。
+
     提到模块级是为了能直接断言（见 tools/smoke.py）——菜单栏图标在没接通屏幕的机器上
-    根本看不到，光靠肉眼看不出它是不是加载成功。
+    根本看不到，光靠肉眼看不出它是不是加载成功、有没有变形。
     """
     d = Path(__file__).resolve().parent / "assets"
-    img = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(18.0, 18.0))
-    got = False
+    img = None
     for name in ("menubar.png", "menubar@2x.png"):
         p = d / name
         if not p.exists():
@@ -110,14 +112,17 @@ def load_menubar_image():
         rep = AppKit.NSBitmapImageRep.imageRepWithData_(data) if data else None
         if rep is None:
             continue
-        rep.setSize_(AppKit.NSMakeSize(18.0, 18.0))
+        pt_h = 18.0
+        pt_w = rep.pixelsWide() * pt_h / rep.pixelsHigh()      # 保住宽高比，别拉变形
+        rep.setSize_(AppKit.NSMakeSize(pt_w, pt_h))
+        if img is None:
+            img = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(pt_w, pt_h))
         img.addRepresentation_(rep)
-        got = True
-    if got:
+    if img is not None:
         # 模板图：系统只取 alpha 取形，按菜单栏明暗自己反色。
         # 忘了这句的后果是深色菜单栏下图标整个看不见——冒烟里有一条断言钉着。
         img.setTemplate_(True)
-    return img if got else None
+    return img
 
 
 def next_linger(want_pill: bool, last_want: bool, linger_until: float,

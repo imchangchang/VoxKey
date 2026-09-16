@@ -19,7 +19,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 VENV="$ROOT/.venv-build"
-APP="$ROOT/packaging/dist/VoxKey.app"
+# PyInstaller 先出到构建目录（scratch），随后把 .app 挪进便携文件夹 packaging/dist/VoxKey/。
+# 别让 PyInstaller 直接写 packaging/dist：它自己的 COLLECT 目录也叫 VoxKey，
+# 会和便携文件夹撞名（真撞过：_internal/ 和 VoxKey.app 混在了同一个文件夹里）。
+APP_BUILT="$ROOT/packaging/build/dist/VoxKey.app"
+PORTABLE="$ROOT/packaging/dist/VoxKey"      # 用户拿到手的就是这个文件夹
+APP="$PORTABLE/VoxKey.app"
 ENTITLEMENTS="$ROOT/packaging/entitlements.plist"
 # PyInstaller 默认把分析缓存写到 ~/Library/Application Support/pyinstaller。
 # 指到仓库里：构建自包含（CI 上也能直接跑），也不去碰用户家目录。
@@ -62,9 +67,30 @@ fi
 echo "==> PyInstaller"
 rm -rf "$ROOT/packaging/build" "$ROOT/packaging/dist"
 "$VENV/bin/pyinstaller" "$ROOT/packaging/voxkey.spec" --noconfirm \
-  --distpath "$ROOT/packaging/dist" --workpath "$ROOT/packaging/build"
+  --distpath "$ROOT/packaging/build/dist" --workpath "$ROOT/packaging/build/work"
 
-test -d "$APP" || { echo "没打出 $APP" >&2; exit 1; }
+test -d "$APP_BUILT" || { echo "没打出 $APP_BUILT" >&2; exit 1; }
+
+# 挪进便携文件夹：模型和日志会落在 .app **旁边**（见 src/voxkey/paths.py）。
+# 包体本身是签名封死的，往里写东西签名立刻失效。
+echo "==> 组装便携文件夹 $PORTABLE"
+mkdir -p "$PORTABLE"
+mv "$APP_BUILT" "$APP"
+cat > "$PORTABLE/读我.txt" <<'TXT'
+VoxKey
+======
+
+双击 VoxKey.app 就能用。
+
+- 首次打开会自动下载识别模型（约 800MB），下载到本文件夹的 models/ 里，
+  进度会显示在屏幕底部的悬浮条上。
+- 日志在 logs/ 里。报问题请带上它。
+- 想卸载：把这个文件夹整个删掉就行，不会在系统里留东西。
+
+注意：不要只把 VoxKey.app 单独拖进「应用程序」——那样模型会改成下到
+~/Library/Application Support/VoxKey/，卸载时不会跟着一起清掉。
+要用「应用程序」，就把整个 VoxKey 文件夹拖过去。
+TXT
 
 # ---------- 4. 签名 ----------
 # 由内往外签：先把包里的 .so/.dylib 逐个签掉，再签整个 bundle。
@@ -102,9 +128,12 @@ fi
 # ---------- 6. 收尾 ----------
 # 压缩一定要做，而且必须放在签名/公证**之后**：压缩包里的 .app 得带着已经装订好的票据，
 # 不然用户解压出来的还是「未公证」的那份。
+# 压的是**便携文件夹**（里面是 VoxKey.app + 读我.txt），不是单独一个 .app：
+# 模型和日志要落在 .app 旁边的文件夹里，卸载才是「删文件夹」。
 ZIP_OUT="$ROOT/packaging/dist/VoxKey-macos-arm64.zip"
-ditto -c -k --keepParent "$APP" "$ZIP_OUT"
+ditto -c -k --keepParent "$PORTABLE" "$ZIP_OUT"
 echo "==> 分发包：$ZIP_OUT"
+unzip -l "$ZIP_OUT" | head -8
 
-echo "==> 完成：$APP"
-du -sh "$APP" "$ZIP_OUT"
+echo "==> 完成：$PORTABLE"
+du -sh "$PORTABLE" "$ZIP_OUT"

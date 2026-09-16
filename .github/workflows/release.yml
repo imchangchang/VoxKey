@@ -91,13 +91,17 @@ jobs:
       - name: 校验产物
         run: |
           set -euo pipefail
-          APP=packaging/dist/VoxKey.app
+          APP=packaging/dist/VoxKey/VoxKey.app
           test -d "$APP"
           # 这两个都是**运行时才加载**的库，不在依赖图里：缺了就是「能启动、一用就崩」
           test -f "$APP/Contents/Frameworks/_sounddevice_data/portaudio-binaries/libportaudio.dylib"
           test -f "$APP/Contents/Frameworks/libsherpa-onnx-c-api.dylib"
+          # 菜单栏图标资源
+          test -f "$APP/Contents/Frameworks/voxkey/assets/menubar@2x.png"
           /usr/libexec/PlistBuddy -c "Print :LSUIElement" "$APP/Contents/Info.plist" | grep -q true
           /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$APP/Contents/Info.plist" >/dev/null
+          # 便携布局：分发包里得是一个文件夹，模型/日志将来落在 .app 旁边
+          test -f "packaging/dist/VoxKey/读我.txt"
           echo "==> 包大小"
           du -sh "$APP"
           echo "==> 校验和（只留文件名，Notes 里好看）"
