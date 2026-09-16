@@ -644,6 +644,37 @@ def log_survives_bad_path() -> str:
     return f"退回到 {where}"
 
 
+def release_consistency() -> str:
+    """发版链路里的名字必须对得上：CI 的资产名、构建脚本产出的压缩包、静态页的下载链接。
+
+    静态页用的是 GitHub 的固定跳转 `releases/latest/download/<文件名>`——文件名差一个字符
+    页面上就是 404，而且**本地跑什么都发现不了**，要等真发一版才暴露。所以在这里钉死。
+    """
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    wf = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    sh = (root / "packaging" / "build_macos.sh").read_text(encoding="utf-8")
+    page = (root / "site" / "index.html").read_text(encoding="utf-8")
+
+    m = re.search(r"^\s*ASSET:\s*(\S+)\s*$", wf, re.M)
+    if not m:
+        raise AssertionError("release.yml 里找不到 ASSET 定义")
+    asset = m.group(1)
+
+    if f"/{asset}\"" not in sh:
+        raise AssertionError(f"build_macos.sh 压出来的文件名不是 {asset}")
+    if f"/releases/latest/download/{asset}" not in page:
+        raise AssertionError(f"静态页的下载链接没指向 releases/latest/download/{asset}")
+    if "imchangchang/VoxKey" not in page:
+        raise AssertionError("静态页里的仓库地址不对")
+    # 打包用的版本号得能从环境变量传进来（CI 按 tag 传），否则包里的版本永远停在默认值
+    spec = (root / "packaging" / "voxkey.spec").read_text(encoding="utf-8")
+    if "VOXKEY_VERSION" not in spec:
+        raise AssertionError("spec 没读 VOXKEY_VERSION，CI 传的 tag 版本号进不去")
+    return f"资产名 {asset} 三处一致"
+
+
 def cli_help(cmd: list[str]) -> str:
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
                        env={**os.environ, "PYTHONPATH": "src"})
@@ -671,6 +702,7 @@ def main() -> int:
     ok &= check("说话检测闸门", speech_gate)
     ok &= check("模型目录规则", model_dir_rules)
     ok &= check("首启下载模型全流程", model_download_flow)
+    ok &= check("发版链路名字一致", release_consistency)
     ok &= check("悬浮条收起再显示", pill_show_hide)
     ok &= check("悬浮条淡出收起", pill_fade)
     ok &= check("悬浮条角标（版本/电量）", pill_meta)

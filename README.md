@@ -45,8 +45,9 @@ export UV_PYTHON_INSTALL_DIR="$PWD/.uv-python" UV_CACHE_DIR="$PWD/.uv-cache"   #
 本机没装 `python3.12`（系统只有 3.9），现有的 `.venv` 是用 uv 建的——uv 建的 venv 不带 pip，
 要补装包先 `.venv/bin/python -m ensurepip`。新机器上装个 uv 直接 `uv venv --python 3.12 .venv` 更省事。
 
-模型不进仓库（每个 1~3GB），下载到 `models/`（默认目录，已被 gitignore），或用环境变量
-`VOXKEY_MODELS_DIR` 指到别处。常驻软件只认 `funasr-nano-int8`：
+模型不进仓库（每个 1~3GB）。**打包后的软件会自己在首次启动时下载**（约 800MB，带 sha256 校验，
+进度显示在悬浮条上）；从源码跑的时候手动放到 `models/`（默认目录，已被 gitignore），
+或用环境变量 `VOXKEY_MODELS_DIR` 指到别处。常驻软件只认 `funasr-nano-int8`：
 
 ```bash
 curl -L -o /tmp/funasr.tar.bz2 \
@@ -125,6 +126,30 @@ PYTHONPATH=src .venv/bin/python tools/smoke.py --no-model # 没下模型时
 覆盖：包导入、悬浮条四态几何断言（文字/波形都在裁剪层内且居中，是数值不是肉眼）、模型加载、
 四个命令行入口的 `--help`。
 
+## 打包与发布
+
+```bash
+packaging/build_macos.sh                    # 出 packaging/dist/VoxKey.app 和 VoxKey-macos-arm64.zip
+packaging/build_macos.sh --sign             # 顺带签名（要 VOXKEY_SIGN_IDENTITY）
+packaging/build_macos.sh --sign --notarize  # 再公证 + 装订（要 VOXKEY_NOTARY_PROFILE）
+```
+
+构建环境是单独的 `.venv-build`，不碰开发用的 `.venv`。图标由 `packaging/make_icon.py` 现画
+（圆角方块 + SF Symbol 的话筒），生成物不进仓库。
+
+发版就是打个 tag，GitHub Actions 会构建、建 Release、传上 `VoxKey-macos-arm64.zip`：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+**资产文件名不能带版本号。** 静态页（`site/`）用的是 GitHub 的固定跳转
+`releases/latest/download/VoxKey-macos-arm64.zip`，名字一变链接就废——这条由冒烟的
+「发版链路名字一致」用例钉着。
+
+签名要 Apple Developer 账号（$99/年）。没签名也能发，只是用户第一次打开得手动放行一次；
+CI 里配好 `MACOS_CERTIFICATE` / `APPLE_ID` 等 secret 就会自动签名 + 公证 + 装订。
+
 ## 已知限制
 
 - 我们的进程一打开设备的键盘集合，**macOS 就收不到该设备的按键报文**（谁先打开谁独占）。所以设备上
@@ -132,4 +157,7 @@ PYTHONPATH=src .venv/bin/python tools/smoke.py --no-model # 没下模型时
 - 远程桌面 / 虚拟机（RDP、VNC、Parallels、VMware）按 scancode 转发、丢掉 Unicode 载荷，会打出一串
   `a`；软件层无解。
 - 密码框、`sudo` 期间系统开了 Secure Input，注入会被吞，此时直接拒绝并提示。
-- 还没打包 `.app`（权限归属、开机自启待做），也没做代码签名。
+- 只出了 macOS（Apple 芯片）的包。Windows / Linux 要另写 UI（托盘 + 悬浮条）和注入层
+  （Windows 用 SendInput；Linux 的 Wayland 没有通用注入协议，是已知的硬骨头）。
+- **签名和公证还没实跑过**（等 Apple Developer 账号）。脚本按官方文档写好放在 `packaging/` 里了。
+- 开机自启还没做。

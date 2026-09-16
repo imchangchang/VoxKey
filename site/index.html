@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxKey — 按住说，松手出字</title>
+<meta name="description" content="按下键盘上的语音键说话，松开手文字直接进当前光标。识别全部在本机完成，音频不上传。">
+<style>
+  :root {
+    --bg: #16181d;
+    --card: #1e2127;
+    --line: #2c3038;
+    --fg: #e8eaed;
+    --dim: #9aa0aa;
+    --accent: #4d8cf5;
+    --ok: #3fbf6a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.7 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 72px 24px 96px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+  .logo {
+    width: 56px; height: 56px; border-radius: 13px; flex: none;
+    background: linear-gradient(160deg, #2a2f3a, #1a1d24);
+    display: grid; place-items: center;
+    border: 1px solid var(--line);
+  }
+  .logo svg { width: 26px; height: 26px; fill: #fff; }
+  h1 { font-size: 28px; margin: 0; letter-spacing: .3px; }
+  .sub { color: var(--dim); font-size: 15px; margin: 2px 0 0; }
+  .lead { font-size: 17px; margin: 0 0 32px; }
+  .lead b { color: #fff; font-weight: 600; }
+
+  .dl {
+    display: block; background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 22px 24px; text-decoration: none; color: inherit;
+    transition: border-color .15s, transform .15s;
+  }
+  .dl:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .dl-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .dl-name { font-size: 17px; font-weight: 600; }
+  .dl-meta { color: var(--dim); font-size: 13px; margin-top: 3px; }
+  .btn {
+    background: var(--accent); color: #fff; border-radius: 9px;
+    padding: 9px 20px; font-weight: 600; font-size: 15px; white-space: nowrap;
+  }
+  .soon { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .soon span {
+    flex: 1 1 150px; text-align: center; color: var(--dim); font-size: 13.5px;
+    border: 1px dashed var(--line); border-radius: 12px; padding: 14px;
+  }
+
+  h2 { font-size: 16px; margin: 40px 0 12px; color: var(--dim); font-weight: 600; }
+  ol, ul { margin: 0; padding-left: 22px; }
+  li { margin: 6px 0; }
+  code {
+    background: #23272f; border: 1px solid var(--line); border-radius: 5px;
+    padding: 1.5px 6px; font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .note {
+    background: #23262d; border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0; padding: 12px 16px; margin: 12px 0;
+    color: #cdd2da; font-size: 14.5px;
+  }
+  .note.warn { border-left-color: #d8a33a; }
+  footer {
+    margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line);
+    color: var(--dim); font-size: 13.5px;
+  }
+  footer a { color: var(--dim); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 16 16"><path d="M8 1a2.5 2.5 0 0 0-2.5 2.5v4a2.5 2.5 0 0 0 5 0v-4A2.5 2.5 0 0 0 8 1z"/><path d="M3.5 7a.75.75 0 0 1 .75.75v.25a3.75 3.75 0 1 0 7.5 0v-.25a.75.75 0 0 1 1.5 0v.25a5.25 5.25 0 0 1-4.5 5.2V14.5h2a.75.75 0 0 1 0 1.5h-5.5a.75.75 0 0 1 0-1.5h2v-1.3a5.25 5.25 0 0 1-4.5-5.2v-.25A.75.75 0 0 1 3.5 7z"/></svg>
+    </div>
+    <div>
+      <h1>VoxKey</h1>
+      <p class="sub">按住说，松手出字</p>
+    </div>
+  </header>
+
+  <p class="lead">
+    按下键盘上的语音键说话，松开手，<b>文字直接进当前光标</b>。
+    不上剪贴板、不弹输入框。识别<b>全部在本机完成</b>，音频不上传。
+  </p>
+
+  <a class="dl" href="https://github.com/imchangchang/VoxKey/releases/latest/download/VoxKey-macos-arm64.zip">
+    <div class="dl-row">
+      <div>
+        <div class="dl-name">macOS（Apple 芯片）</div>
+        <div class="dl-meta" id="meta">需要 macOS 12 或更新版本 · arm64</div>
+      </div>
+      <div class="btn">下载</div>
+    </div>
+  </a>
+  <div class="soon">
+    <span>Windows · 计划中</span>
+    <span>Linux · 计划中</span>
+  </div>
+
+  <h2>装好之后</h2>
+  <ol>
+    <li>把 <code>VoxKey.app</code> 拖进「应用程序」，双击打开。</li>
+    <li>它会先下载识别模型（约 800MB，首次一次性，之后不再下）。悬浮条上能看到进度。</li>
+    <li>按提示授权三项权限：
+      <ul>
+        <li><b>麦克风</b> — 录音</li>
+        <li><b>辅助功能</b> — 把文字写进当前输入框</li>
+        <li><b>输入监控</b> — 读设备发来的按键</li>
+      </ul>
+    </li>
+    <li>按设备上的语音键说话，松手上屏。菜单栏图标里可以暂停、手动开始、看状态。</li>
+  </ol>
+
+  <div class="note warn" id="gatekeeper">
+    <b>第一次打开被系统拦下？</b>未签名的版本会提示「无法验证开发者」。
+    在「系统设置 → 隐私与安全性」里点「仍要打开」，或者右键点 App 图标选「打开」。
+    只需要放行一次。
+  </div>
+
+  <h2>出问题了</h2>
+  <p>
+    日志在 <code>~/Library/Logs/VoxKey/voxkey.log</code>，启动时也会把路径打进日志。
+    报问题请带上它，以及 <a href="https://github.com/imchangchang/VoxKey/issues">开一个 issue</a>。
+  </p>
+
+  <footer>
+    源码与更新记录：<a href="https://github.com/imchangchang/VoxKey">github.com/imchangchang/VoxKey</a>
+    　·　识别引擎：sherpa-onnx（本机离线推理）
+  </footer>
+
+</div>
+
+<script>
+// 顺带把最新版本号和包大小显示出来。拿不到就算了——这只是锦上添花，
+// 下载链接本身是 GitHub 的固定跳转（releases/latest/download/…），不依赖这段脚本。
+fetch("https://api.github.com/repos/imchangchang/VoxKey/releases/latest")
+  .then(function (r) { return r.ok ? r.json() : null; })
+  .then(function (rel) {
+    if (!rel) return;
+    var asset = (rel.assets || []).filter(function (a) {
+      return a.name === "VoxKey-macos-arm64.zip";
+    })[0];
+    var parts = ["需要 macOS 12 或更新版本 · arm64", "最新版 " + rel.tag_name];
+    if (asset) parts.push((asset.size / 1048576).toFixed(0) + " MB");
+    document.getElementById("meta").textContent = parts.join(" · ");
+  })
+  .catch(function () { /* 没网/限流：保持默认文案 */ });
+</script>
+</body>
+</html>

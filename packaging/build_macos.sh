@@ -40,9 +40,12 @@ if [ "$(uname -m)" != "arm64" ]; then
 fi
 
 # ---------- 1. 构建环境（独立一份，不碰开发用的 .venv） ----------
+# 拿哪个解释器去建构建环境：优先开发用的 .venv，没有就退回系统 python3（CI 上只有 python3）
+BOOTSTRAP_PY="${VOXKEY_BOOTSTRAP_PYTHON:-$ROOT/.venv/bin/python}"
+[ -x "$BOOTSTRAP_PY" ] || BOOTSTRAP_PY="$(command -v python3)"
 if [ ! -x "$VENV/bin/pyinstaller" ]; then
-  echo "==> 建构建环境 $VENV"
-  .venv/bin/python -m venv "$VENV"
+  echo "==> 建构建环境 $VENV（用 $BOOTSTRAP_PY）"
+  "$BOOTSTRAP_PY" -m venv "$VENV"
   "$VENV/bin/python" -m pip install -q --upgrade pip
   "$VENV/bin/python" -m pip install -q -e '.[tools]' pyinstaller
 fi
@@ -95,12 +98,11 @@ if [ "$DO_NOTARIZE" = 1 ]; then
 fi
 
 # ---------- 6. 收尾 ----------
+# 压缩一定要做，而且必须放在签名/公证**之后**：压缩包里的 .app 得带着已经装订好的票据，
+# 不然用户解压出来的还是「未公证」的那份。
 ZIP_OUT="$ROOT/packaging/dist/VoxKey-macos-arm64.zip"
-if [ "$DO_NOTARIZE" = 1 ]; then
-  # 签名/装订之后再压缩：压缩包里的 .app 必须带着已经装订好的票据
-  ditto -c -k --keepParent "$APP" "$ZIP_OUT"
-  echo "==> 分发包：$ZIP_OUT"
-fi
+ditto -c -k --keepParent "$APP" "$ZIP_OUT"
+echo "==> 分发包：$ZIP_OUT"
 
 echo "==> 完成：$APP"
-du -sh "$APP"
+du -sh "$APP" "$ZIP_OUT"

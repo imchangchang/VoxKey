@@ -10,11 +10,14 @@
 """
 
 from pathlib import Path
+import os
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 ROOT = Path(SPECPATH).parent          # SPECPATH = packaging/
-VERSION = "0.1.0"                     # 发版时和 pyproject.toml 一起改
+# 版本号：CI 从 tag 传进来（v0.1.0 → 0.1.0），本地构建就用这里的默认值。
+# 发版时记得和 pyproject.toml 的 version 一起改。
+VERSION = os.environ.get("VOXKEY_VERSION") or "0.1.0"
 BUNDLE_ID = "com.imchangchang.voxkey"
 ICON = ROOT / "packaging" / "AppIcon.icns"
 

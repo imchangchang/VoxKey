@@ -20,12 +20,19 @@
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[tools]'
 PYTHONPATH=src .venv/bin/python -m voxkey.app            # 常驻
 PYTHONPATH=src .venv/bin/python tools/smoke.py          # 改完代码先跑这个（不连设备、不要权限）
+packaging/build_macos.sh                                # 出 .app + 分发包（用独立的 .venv-build）
 ```
 
-- 模型不进仓库：默认放 `models/`，或 `VOXKEY_MODELS_DIR` 指到别处（下载清单见 README）
+- 模型不进仓库：源码运行默认放 `models/`，或 `VOXKEY_MODELS_DIR` 指到别处；
+  **打包后由首启自动下载**（`src/voxkey/modeldl.py`）到 `~/Library/Application Support/VoxKey/models`
+- 要写盘的东西（模型、日志）一律走 `src/voxkey/paths.py`：打包后 `__file__` 在只读的 .app 包体里，
+  不能再拿它推目录
 - `tools/smoke.py` 覆盖：包导入、悬浮条四态几何断言（内容在裁剪层内且居中）、模型加载、
-  四个 CLI 入口 `--help`。改动 UI/布局/依赖后必须跑，**别用「看起来差不多」验收数值问题**
+  首启下载全流程、发版资产名一致性、四个 CLI 入口 `--help`。改动 UI/布局/依赖后必须跑，
+  **别用「看起来差不多」验收数值问题**
 - 涉及 UI 的改动，验证要落到数值或像素：断言层 frame、或截图 + numpy 量像素，而不是肉眼
+- 打包/发版见 README 的「打包与发布」；发版靠打 tag（`v*`）触发 Actions，**资产文件名不许带版本号**
+  （静态页用的是 `releases/latest/download/<固定名>`）
 
 ## 代码约定
 

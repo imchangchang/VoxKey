@@ -1,0 +1,41 @@
+name: 静态页
+
+# site/ 里的东西一改就重新部署。
+# 注意：**私有仓库的 Pages 需要付费套餐**（Pro/Team/Enterprise），免费账号上这个 job 会失败。
+# 仓库转公开之后不用改任何东西，直接就能跑。
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只部署一次；新的推送直接顶掉排队中的旧任务
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+        with:
+          # 仓库还没开 Pages 就顺手开掉，省得再手动去设置里点一遍
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
