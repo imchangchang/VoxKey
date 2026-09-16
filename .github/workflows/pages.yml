@@ -5,9 +5,9 @@ name: 静态页
 # 仓库转公开之后不用改任何东西，直接就能跑。
 on:
   push:
-    # 临时把 release-macos 也加上：为了**验证部署链路本身能跑通**（默认分支还没推上去）。
-    # 验完就撤掉，只留 main。
-    branches: [main, release-macos]
+    # 只从 main 部署。试过从开发分支部署来验证链路——不行，github-pages 环境有保护规则，
+    # 非默认分支会被直接拒掉（"Branch … is not allowed to deploy to github-pages"）。
+    branches: [main]
     paths: ["site/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
