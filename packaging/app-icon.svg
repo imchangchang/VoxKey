@@ -1,20 +1,35 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 768 2048" width="768" height="2048">
-  <rect width="768" height="2048" fill="#ffffff"/>
-  <g stroke="#000000" stroke-width="9" fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="109.5" y="99.5" width="535" height="1870" rx="36.5" ry="36.5"/>
-    <ellipse cx="376.5" cy="572.5" rx="235.5" ry="233.5"/>
-    <rect x="176.0" y="165.0" width="36" height="116" rx="58.0" ry="58.0"/>
-    <rect x="250.0" y="149.0" width="35" height="147" rx="73.5" ry="73.5"/>
-    <rect x="323.0" y="149.0" width="35" height="147" rx="73.5" ry="73.5"/>
-    <rect x="395.0" y="149.0" width="35" height="147" rx="73.5" ry="73.5"/>
-    <rect x="468.0" y="149.0" width="35" height="147" rx="73.5" ry="73.5"/>
-    <rect x="541.0" y="165.0" width="36" height="116" rx="58.0" ry="58.0"/>
-    <rect x="196.5" y="862.5" width="360" height="1022" rx="15.5" ry="15.5"/>
-    <rect x="213.0" y="877.0" width="327" height="319" rx="11.5" ry="11.5"/>
-    <rect x="213.0" y="1212.0" width="327" height="321" rx="11.5" ry="11.5"/>
-    <rect x="213.0" y="1549.0" width="327" height="320" rx="11.5" ry="11.5"/>
-    <ellipse cx="377.0" cy="1037.0" rx="126.0" ry="124.0"/>
-    <ellipse cx="376.5" cy="1373.5" rx="126.5" ry="125.5"/>
-    <ellipse cx="376.5" cy="1711.0" rx="126.5" ry="126.0"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 960" width="360" height="960">
+  <!-- 外框：竖长圆角矩形 -->
+  <rect x="32" y="22" width="296" height="916" rx="36" ry="36"
+        fill="none" stroke="#000000" stroke-width="10"/>
+
+  <!-- 顶部扬声器开孔：两边短、中间长的6条竖线 -->
+  <rect x="62"  y="60" width="12" height="38" rx="6" ry="6" fill="#000000"/>
+  <rect x="104" y="50" width="12" height="56" rx="6" ry="6" fill="#000000"/>
+  <rect x="146" y="50" width="12" height="56" rx="6" ry="6" fill="#000000"/>
+  <rect x="188" y="50" width="12" height="56" rx="6" ry="6" fill="#000000"/>
+  <rect x="230" y="50" width="12" height="56" rx="6" ry="6" fill="#000000"/>
+  <rect x="272" y="60" width="12" height="38" rx="6" ry="6" fill="#000000"/>
+
+  <!-- 中间导航圆盘：放大，左右间距小 -->
+  <circle cx="180" cy="250" r="130"
+          fill="none" stroke="#000000" stroke-width="10"/>
+
+  <!-- 按钮1：方形套圆形 -->
+  <rect x="105" y="410" width="150" height="150"
+        fill="none" stroke="#000000" stroke-width="10"/>
+  <circle cx="180" cy="485" r="46"
+          fill="none" stroke="#000000" stroke-width="10"/>
+
+  <!-- 按钮2：方形套圆形 -->
+  <rect x="105" y="585" width="150" height="150"
+        fill="none" stroke="#000000" stroke-width="10"/>
+  <circle cx="180" cy="660" r="46"
+          fill="none" stroke="#000000" stroke-width="10"/>
+
+  <!-- 按钮3：方形套圆形 -->
+  <rect x="105" y="760" width="150" height="150"
+        fill="none" stroke="#000000" stroke-width="10"/>
+  <circle cx="180" cy="835" r="46"
+          fill="none" stroke="#000000" stroke-width="10"/>
 </svg>

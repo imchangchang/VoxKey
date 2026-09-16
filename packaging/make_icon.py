@@ -43,6 +43,13 @@ MENUBAR_HEIGHT_PT = 18          # 菜单栏图标惯例高度
 # 小尺寸下给描边兜底：线稿等比缩小后必然淡掉，至少别让它完全消失
 MIN_STROKE_PX = 0.9
 
+# App 图标垫什么底色。设计稿是**纯线稿、没有底色**，而 macOS 的 App 图标惯例是实心底——
+# 透明底的黑色线稿摆在 Dock 里会像没做完。做成常量方便改（换色只动这一行）。
+# 想还原设计稿原样（透明底）就把这里设成 None。
+APP_ICON_BG = "#ffffff"
+
+# 菜单栏图**不能**垫底：那是模板图，垫了底就变成一个方块，而且不再跟随菜单栏明暗反色
+
 
 def build_icns() -> None:
     with tempfile.TemporaryDirectory() as td:
@@ -51,7 +58,8 @@ def build_icns() -> None:
         for base, scale in SPECS:
             px = base * scale
             name = f"icon_{base}x{base}{'@2x' if scale == 2 else ''}.png"
-            render(SVG, iconset / name, px, width=px, min_stroke_px=MIN_STROKE_PX)
+            render(SVG, iconset / name, px, width=px, min_stroke_px=MIN_STROKE_PX,
+                   bg=APP_ICON_BG)
         r = subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(ICNS)],
                            capture_output=True, text=True)
         if r.returncode != 0:

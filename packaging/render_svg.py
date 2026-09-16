@@ -25,7 +25,7 @@ import AppKit
 SVG_NS = "{http://www.w3.org/2000/svg}"
 
 # 只会画这几种；出现别的就报错，别装作画好了
-SUPPORTED = {"svg", "g", "rect", "ellipse"}
+SUPPORTED = {"svg", "g", "rect", "ellipse", "circle"}
 
 
 def _tag(el) -> str:
@@ -71,6 +71,10 @@ def parse(svg_path: Path):
         elif t == "ellipse":
             shapes.append(dict(kind="ellipse", style=style, cx=_num(el.get("cx")),
                                cy=_num(el.get("cy")), rx=_num(el.get("rx")), ry=_num(el.get("ry"))))
+        elif t == "circle":
+            r = _num(el.get("r"))
+            shapes.append(dict(kind="ellipse", style=style, cx=_num(el.get("cx")),
+                               cy=_num(el.get("cy")), rx=r, ry=r))
         for child in el:
             walk(child, style)
 
@@ -96,7 +100,8 @@ def _color(name: str | None, fallback_black=True):
 def render(svg_path: Path, out_png: Path, height: int, template: bool = False,
            stroke_scale: float = 1.0, width: int | None = None,
            crop: tuple[float, float, float, float] | None = None,
-           min_stroke_px: float = 0.0, skip: set[int] | None = None) -> tuple[int, int]:
+           min_stroke_px: float = 0.0, skip: set[int] | None = None,
+           bg: str | None = None) -> tuple[int, int]:
     """渲染成 PNG。
 
     height/width 给的是画布像素尺寸；图形按 viewBox 等比缩放后**居中**放进去。
@@ -146,6 +151,15 @@ def render(svg_path: Path, out_png: Path, height: int, template: bool = False,
         # SVG 原点在左上、AppKit 在左下，y 要翻过来
         return AppKit.NSMakeRect(ox + x * scale, h - (oy + (y + rh) * scale), rw * scale, rh * scale)
 
+    # 背景垫底（可选）：设计稿是纯线稿、没有底色，而 macOS 的 App 图标惯例是实心底——
+    # 透明底的黑色线稿摆在 Dock 里会像没做完。尺寸取画布的 82%、圆角按 Apple 图标网格。
+    if bg and not template:
+        m = w * 0.09
+        box = AppKit.NSMakeRect(m, m, w - 2 * m, h - 2 * m)
+        rad = min(w, h) * 0.82 * 0.2237
+        _color(bg).set()
+        AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(box, rad, rad).fill()
+
     for s in shapes:
         st = s["style"]
         if s["kind"] == "rect":
@@ -193,6 +207,8 @@ def main() -> int:
                     help="描边加粗倍数（小尺寸下线条太细时用）")
     ap.add_argument("--min-stroke-px", type=float, default=0.0,
                     help="描边像素下限：线稿等比缩小后会淡成灰，给个下限兜底")
+    ap.add_argument("--bg", default=None,
+                    help="给 App 图标垫个底色（如 #ffffff）；纯线稿设计稿需要它，菜单栏图不要用")
     ap.add_argument("--skip", default=None,
                     help="不画的图元序号，如 3-14 或 3,4,5（按解析顺序从 0 数）")
     ap.add_argument("--crop", metavar="x,y,w,h", default=None,
@@ -210,7 +226,7 @@ def main() -> int:
         else:
             skip.add(int(part))
     w, h = render(a.src, a.out, a.height, a.template, a.stroke_scale, a.width, crop,
-                  a.min_stroke_px, skip or None)
+                  a.min_stroke_px, skip or None, a.bg)
     print(f"{a.out}  {w}x{h}  {a.out.stat().st_size} 字节")
     return 0
 
