@@ -46,7 +46,9 @@ export UV_PYTHON_INSTALL_DIR="$PWD/.uv-python" UV_CACHE_DIR="$PWD/.uv-cache"   #
 要补装包先 `.venv/bin/python -m ensurepip`。新机器上装个 uv 直接 `uv venv --python 3.12 .venv` 更省事。
 
 模型不进仓库（每个 1~3GB）。**打包后的软件会自己在首次启动时下载**（约 800MB，带 sha256 校验，
-进度显示在悬浮条上）；从源码跑的时候手动放到 `models/`（默认目录，已被 gitignore），
+进度显示在悬浮条上），下到 `VoxKey.app` **旁边**的 `models/` 里——便携布局，卸载就是删文件夹，
+不在 `~/Library` 留东西（见 `src/voxkey/paths.py` 里那段说明：模型没法塞进 .app 内部，
+包体是签名封死的）。从源码跑的时候手动放到仓库根的 `models/`（已被 gitignore），
 或用环境变量 `VOXKEY_MODELS_DIR` 指到别处。常驻软件只认 `funasr-nano-int8`：
 
 ```bash
@@ -129,13 +131,16 @@ PYTHONPATH=src .venv/bin/python tools/smoke.py --no-model # 没下模型时
 ## 打包与发布
 
 ```bash
-packaging/build_macos.sh                    # 出 packaging/dist/VoxKey.app 和 VoxKey-macos-arm64.zip
+packaging/build_macos.sh                    # 出 packaging/dist/VoxKey/ 和 VoxKey-macos-arm64.zip
 packaging/build_macos.sh --sign             # 顺带签名（要 VOXKEY_SIGN_IDENTITY）
 packaging/build_macos.sh --sign --notarize  # 再公证 + 装订（要 VOXKEY_NOTARY_PROFILE）
 ```
 
-构建环境是单独的 `.venv-build`，不碰开发用的 `.venv`。图标由 `packaging/make_icon.py` 现画
-（圆角方块 + SF Symbol 的话筒），生成物不进仓库。
+产物是**便携文件夹** `packaging/dist/VoxKey/`（里面 `VoxKey.app` + `读我.txt`），分发的压缩包
+就是把它整个打进去。用户那边模型和日志会落在 `.app` 旁边，卸载 = 删文件夹。
+
+构建环境是单独的 `.venv-build`，不碰开发用的 `.venv`。图标由 `packaging/make_icon.py`
+从设计稿 `packaging/app-icon.svg` 生成（应用图标出 icns、菜单栏出模板 png），icns 不进仓库。
 
 发版就是打个 tag，GitHub Actions 会构建、建 Release、传上 `VoxKey-macos-arm64.zip`：
 

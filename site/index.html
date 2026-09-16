@@ -112,8 +112,10 @@
 
   <h2>装好之后</h2>
   <ol>
-    <li>把 <code>VoxKey.app</code> 拖进「应用程序」，双击打开。</li>
-    <li>它会先下载识别模型（约 800MB，首次一次性，之后不再下）。悬浮条上能看到进度。</li>
+    <li>解压出来是一个 <code>VoxKey</code> 文件夹，里面是 <code>VoxKey.app</code>。
+      双击打开就行；想放进「应用程序」就<b>连整个文件夹一起拖</b>，别只拖 .app。</li>
+    <li>首次打开会自动下载识别模型（约 800MB，只下一次）。它会下到这个文件夹的
+      <code>models/</code> 里，进度显示在屏幕底部的悬浮条上。</li>
     <li>按提示授权三项权限：
       <ul>
         <li><b>麦克风</b> — 录音</li>
@@ -124,6 +126,13 @@
     <li>按设备上的语音键说话，松手上屏。菜单栏图标里可以暂停、手动开始、看状态。</li>
   </ol>
 
+  <div class="note">
+    <b>为什么是一个文件夹，不是单独一个 .app？</b>
+    模型和日志就放在 <code>VoxKey.app</code> <b>旁边</b>，所以<b>卸载 = 把这个文件夹删掉</b>，
+    不在 <code>~/Library</code> 里留任何东西。
+    （模型没法塞进 .app 内部：macOS 的 App 包是签名封死的，往里写东西签名立刻失效。）
+  </div>
+
   <div class="note warn" id="gatekeeper">
     <b>第一次打开被系统拦下？</b>未签名的版本会提示「无法验证开发者」。
     在「系统设置 → 隐私与安全性」里点「仍要打开」，或者右键点 App 图标选「打开」。
@@ -132,7 +141,7 @@
 
   <h2>出问题了</h2>
   <p>
-    日志在 <code>~/Library/Logs/VoxKey/voxkey.log</code>，启动时也会把路径打进日志。
+    日志在 <code>VoxKey/logs/voxkey.log</code>（就在 App 旁边），启动时也会把路径打进日志。
     报问题请带上它，以及 <a href="https://github.com/imchangchang/VoxKey/issues">开一个 issue</a>。
   </p>
 

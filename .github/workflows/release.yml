@@ -125,9 +125,13 @@ jobs:
             cat /tmp/sha256.txt
             echo '```'
             echo
-            echo "- 首次打开会自动下载识别模型（约 800MB），下载完就能用"
+            echo "解压出来是一个 \`VoxKey\` 文件夹（里面是 \`VoxKey.app\`），双击就能用。"
+            echo
+            echo "- 首次打开会自动下载识别模型（约 800MB，只下一次），下到文件夹里的 \`models/\`"
+            echo "- 日志在同文件夹的 \`logs/\`；**卸载 = 把整个文件夹删掉**，不在 ~/Library 留东西"
             echo "- 识别全部在本机完成，音频不上传"
             echo "- 需要授权：麦克风、辅助功能（上屏）、输入监控（读设备按键）"
+            echo "- 未签名版本第一次打开要在「系统设置 → 隐私与安全性」里放行一次"
           } > /tmp/notes.md
           # v0.1.0-rc1 这种带连字符的是预发布：不占 latest，也就不会顶掉
           # 静态页那条 releases/latest/download 的链接
