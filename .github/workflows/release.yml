@@ -100,8 +100,8 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$APP/Contents/Info.plist" >/dev/null
           echo "==> 包大小"
           du -sh "$APP"
-          echo "==> 校验和"
-          shasum -a 256 "packaging/dist/$ASSET" | tee /tmp/sha256.txt
+          echo "==> 校验和（只留文件名，Notes 里好看）"
+          ( cd packaging/dist && shasum -a 256 "$ASSET" ) | tee /tmp/sha256.txt
 
       - uses: actions/upload-artifact@v4
         with:
