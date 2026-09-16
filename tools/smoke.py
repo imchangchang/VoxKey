@@ -318,6 +318,8 @@ def pill_wanted_table() -> str:
         ("暂停监听 → 出现", {"paused": True}, OLD, True, True, OLD),
         ("缺辅助功能权限 → 出现", {"post_ok": False}, OLD, True, True, OLD),
         ("麦克风没权限 → 出现（且浮窗要写明是麦克风）", {"mic_ok": False}, OLD, True, True, OLD),
+        ("缺输入监控 → 出现（设备会「看不见」，得说清是权限）",
+         {"hid_ok": False, "connected": False}, OLD, True, True, OLD),
         ("模型加载失败 → 出现", {"phase": "err"}, OLD, True, True, OLD),
         ("刚上屏失败 → 出现一会儿", {"injected": "未上屏：没有辅助功能权限"},
          FAULT_HOLD_S - 1.0, True, True, OLD),
@@ -753,6 +755,21 @@ def icon_assets_fresh() -> str:
     return f"与设计稿逐字节一致，且能加载成模板图（{len(reps)} 档密度，{sizes[-1][0]}×{sizes[-1][1]} 像素那档）"
 
 
+def input_monitoring_probe() -> str:
+    """「输入监控」权限探测要能用，而且**不能因为查不到就抛异常**。
+
+    打包版第一次跑必踩这个坑：权限记在终端头上而不是 App 头上，缺了之后设备直接枚举不出来，
+    报的是「设备未连接」。所以这里至少要保证探测本身可靠。
+    """
+    from voxkey.device.keyreader import input_monitoring_status
+
+    st = input_monitoring_status()
+    if st is not None and st not in (0, 1, 2):
+        raise AssertionError(f"IOHIDCheckAccess 回了意料之外的值 {st}（只该是 0/1/2）")
+    names = {0: "已授权", 1: "被拒", 2: "还没问过", None: "查不出来（非 macOS）"}
+    return f"探测正常：{names[st]}"
+
+
 def cli_help(cmd: list[str]) -> str:
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
                        env={**os.environ, "PYTHONPATH": "src"})
@@ -783,6 +800,7 @@ def main() -> int:
     ok &= check("发版链路名字一致", release_consistency)
     ok &= check("shell 变量不裸接中文", shell_var_before_cjk)
     ok &= check("菜单栏图标与设计稿一致", icon_assets_fresh)
+    ok &= check("输入监控权限探测", input_monitoring_probe)
     ok &= check("悬浮条收起再显示", pill_show_hide)
     ok &= check("悬浮条淡出收起", pill_fade)
     ok &= check("悬浮条角标（版本/电量）", pill_meta)

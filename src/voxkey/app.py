@@ -49,7 +49,8 @@ from voxkey.devicewatch import DeviceState, DeviceWatch
 from voxkey.logging import log, log_target
 from voxkey.state import State
 from voxkey.device.keyreader import (KC_ESC, KC_F9, KC_F11, KC_VOICE, MOD_CMD, MOD_CTRL,
-                                     MOD_OPT, DeviceKeyReader, find_keyboard_path)
+                                     MOD_OPT, DeviceKeyReader, find_keyboard_path,
+                                     input_monitoring_status, request_input_monitoring)
 from voxkey.inject import Injector, ax_trusted, frontmost_info, reactivate
 from voxkey.models import load_recognizer
 from voxkey import modeldl
@@ -156,6 +157,7 @@ def pill_wanted(st: dict, fault_age: float, battery_age: float = 1e9,
         or st["paused"]                                     # 用户主动停了监听，得让人看见
         or st["connected"] in (False, None)                 # 设备掉线 / 还在探测
         or not st["post_ok"] or not st["mic_ok"]            # 权限缺失（None = 还在查）
+        or st.get("hid_ok") is False                        # 缺输入监控：设备会「看不见」
         or fresh_charging                                    # 充电中（数据够新才算）
         or (st["injected"].startswith("未上屏") and fault_age < FAULT_HOLD_S))
 
@@ -237,6 +239,9 @@ class TrayApp(Foundation.NSObject):
             phase=PHASE_IDLE, connected=None, reason="", paused=False,
             last_text="", device_info="设备信息读取中…",
             mic_ok=None, post_ok=None, injected="", device_off=False,
+            # 「输入监控」权限：读设备 HID 按键要用。缺了之后设备**枚举不出来**，
+            # 现象和没插接收器一样，所以单独记一个状态、单独提示（见 keyreader 里那段注释）
+            hid_ok=None,
             # 悬浮条角标（电量/电压/是否充电）：只在按键时读一次，所以带时间戳判新鲜度
             fw_version="", battery_pct=None, battery_mv=None,
             battery_charging=False, battery_ts=0.0,
@@ -687,6 +692,8 @@ class TrayApp(Foundation.NSObject):
         self.mi_toggle.setTitle_("恢复监听" if st["paused"] else "暂停监听")
         self.mi_mic.setTitle_(f"权限：麦克风 {mic}")
         self.mi_post.setTitle_(f"权限：辅助功能（AX 直写用）{post}")
+        hid = {True: "已授权", False: "未授权（去授权）", None: "查不到"}[st.get("hid_ok")]
+        self.mi_hid.setTitle_(f"权限：输入监控（读设备按键）{hid}")
         self.mi_pill.setTitle_(f"悬浮状态条：{'自动（空闲收起）' if self.pill_auto else '已关闭'}")
 
         # 悬浮条：空闲时收起来不占位置（用户要求），只在「有事要说」的时候出现。
@@ -748,6 +755,10 @@ class TrayApp(Foundation.NSObject):
                 detail = (st["reason"].partition("：")[2].strip() or None)   # 失败原因写全
             elif st["paused"]:
                 color = YELLOW
+            elif st.get("hid_ok") is False:
+                # 排在「设备未连接」前面：输入监控没授权时设备根本枚举不出来，
+                # 报「未连接」会把用户引到「是不是没插好」上去，实际要做的是去授权
+                text, color = "缺输入监控权限", ORANGE
             elif st["connected"] is False:
                 color = YELLOW
             elif st["phase"] == PHASE_ERR:
@@ -827,11 +838,14 @@ class TrayApp(Foundation.NSObject):
             return
         self._perm_checked_at = now
         post, mic = ax_trusted(), mic_status() == 3
+        hid = input_monitoring_status()
+        hid_ok = None if hid is None else (hid == 0)
         st = self.get_state()
-        if (post, mic) != (st["post_ok"], st["mic_ok"]):
-            self.set_state(post_ok=post, mic_ok=mic)
+        if (post, mic, hid_ok) != (st["post_ok"], st["mic_ok"], st["hid_ok"]):
+            self.set_state(post_ok=post, mic_ok=mic, hid_ok=hid_ok)
             log("权限", f"变更：麦克风 {'已授权' if mic else '未授权'}，"
-                        f"辅助功能 {'已授权' if post else '未授权'}"
+                        f"辅助功能 {'已授权' if post else '未授权'}，"
+                        f"输入监控 {'已授权' if hid_ok else '未授权' if hid_ok is False else '查不到'}"
                         + ("（现在可以上屏了）" if post else ""))
             if mic:
                 self._mic_denied_warned = False      # 恢复了；下次再掉还能再提醒一次
@@ -965,6 +979,16 @@ class TrayApp(Foundation.NSObject):
     def openAccessibility_(self, _sender):
         open_settings("Privacy_Accessibility")
 
+    def requestListen_(self, _sender):
+        """请求「输入监控」权限：先调 IOHIDRequestAccess 弹系统框，再跳设置。
+
+        这一项没有会自己弹的 API，只能主动调；而且系统只在「还没问过」的时候真弹，
+        用户拒过之后就只剩去设置里勾这条路，所以两件事一起做。
+        """
+        ok = request_input_monitoring()
+        log("权限", "已请求输入监控权限" + ("（已授权）" if ok else "（系统没弹框或已拒绝，去设置里勾）"))
+        open_settings("Privacy_ListenEvent")
+
     def quitApp_(self, _sender):
         log("退出", "拜拜")
         self.stop_event.set()
@@ -1023,6 +1047,7 @@ class TrayApp(Foundation.NSObject):
         self.mi_mic = add("权限：麦克风 …", "openMic:")
         self.mi_post = add("权限：辅助功能（上屏用）…", "openAccessibility:")
         self.mi_request_post = add("启用上屏：请求辅助功能权限", "requestPost:")
+        self.mi_hid = add("权限：输入监控（读设备按键）…", "requestListen:")
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
         add("退出", "quitApp:")
         self.item.setMenu_(menu)
@@ -1093,6 +1118,15 @@ class TrayApp(Foundation.NSObject):
         st = self.get_state()
         log("权限", f"麦克风 {'已授权' if st['mic_ok'] else '未授权（采不到音）'}，"
                     f"辅助功能 {'已授权' if st['post_ok'] else '未授权（写不进输入框）'}")
+        # 输入监控：没问过就先弹一次系统框。不主动问的话，缺权限时设备枚举不出来，
+        # 用户看到的是「设备未连接」——完全联想不到要去授权（打包版第一次跑必踩）。
+        hid = input_monitoring_status()
+        if hid == 2:
+            log("权限", "输入监控还没问过，弹一次系统授权框")
+            hid = 0 if request_input_monitoring() else input_monitoring_status()
+        self.set_state(hid_ok=None if hid is None else hid == 0)
+        log("权限", "输入监控 " + {0: "已授权", 1: "未授权（读不到设备按键，去「系统设置 → 隐私与安全性 → 输入监控」勾上）"}
+            .get(hid, "查不到（非 macOS？）"))
         log("日志", f"日志位置：{log_target()}")
 
         self.audio_device = find_input_device(self.args.device)

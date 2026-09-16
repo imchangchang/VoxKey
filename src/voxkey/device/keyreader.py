@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import threading
 import time
 from typing import Callable
@@ -45,6 +46,58 @@ def find_keyboard_path() -> bytes | None:
         if d["usage_page"] == 1 and d["usage"] == 6:  # Generic Desktop / Keyboard
             return d["path"]
     return None
+
+
+# ---------------------------------------------------------------- 输入监控权限（macOS）
+
+_HID_LISTEN = 1          # kIOHIDRequestTypeListenEvent
+_IOKIT = "/System/Library/Frameworks/IOKit.framework/IOKit"
+_iokit_lib = None
+
+
+def _iokit():
+    global _iokit_lib
+    if _iokit_lib is None:
+        try:
+            _iokit_lib = ctypes.cdll.LoadLibrary(_IOKIT)
+        except OSError:
+            _iokit_lib = False
+    return _iokit_lib or None
+
+
+def input_monitoring_status() -> int | None:
+    """「输入监控」权限：0=已授权 / 1=被拒 / 2=还没问过；None=查不出来（非 macOS 之类）。
+
+    读设备（AU05）的 HID 键盘集合需要它。缺了之后 `hid.enumerate()` **根本看不到键盘集合**，
+    现象和「接收器没插」一模一样，光看日志查不出来，所以必须单独查、单独提示。
+    真踩过：开发时权限记在终端头上，打包成 .app 之后要重新给 App 授权，一启动就是「设备未连接」。
+    """
+    lib = _iokit()
+    if lib is None:
+        return None
+    try:
+        lib.IOHIDCheckAccess.restype = ctypes.c_int
+        lib.IOHIDCheckAccess.argtypes = [ctypes.c_int]
+        return int(lib.IOHIDCheckAccess(_HID_LISTEN))
+    except Exception:
+        return None
+
+
+def request_input_monitoring() -> bool:
+    """弹系统授权框。
+
+    这一项**没有会自己弹的 API**：只能由 App 主动调 IOHIDRequestAccess，而且系统只在
+    「还没问过」的时候真弹；用户拒过之后就只能去系统设置里勾。
+    """
+    lib = _iokit()
+    if lib is None:
+        return False
+    try:
+        lib.IOHIDRequestAccess.restype = ctypes.c_bool
+        lib.IOHIDRequestAccess.argtypes = [ctypes.c_int]
+        return bool(lib.IOHIDRequestAccess(_HID_LISTEN))
+    except Exception:
+        return False
 
 
 def parse_report(raw: bytes) -> tuple[int, list[int]] | None:
