@@ -152,13 +152,15 @@ def render(svg_path: Path, out_png: Path, height: int, template: bool = False,
         return AppKit.NSMakeRect(ox + x * scale, h - (oy + (y + rh) * scale), rw * scale, rh * scale)
 
     # 背景垫底（可选）：设计稿是纯线稿、没有底色，而 macOS 的 App 图标惯例是实心底——
-    # 透明底的黑色线稿摆在 Dock 里会像没做完。尺寸取画布的 82%、圆角按 Apple 图标网格。
+    # 透明底的黑色线稿摆在 Dock 里会像没做完。
+    #
+    # **必须铺满整个画布**：之前留了 18% 边距（Apple 图标网格那套 82% 比例），结果白底
+    # 的四个圆角是透明的，透出系统的灰容器，图标看起来像"灰框套白框"，而别人的图标都铺满。
+    # 边距交给系统去加，我们只管铺满。
     if bg and not template:
-        m = w * 0.09
-        box = AppKit.NSMakeRect(m, m, w - 2 * m, h - 2 * m)
-        rad = min(w, h) * 0.82 * 0.2237
         _color(bg).set()
-        AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(box, rad, rad).fill()
+        AppKit.NSBezierPath.bezierPathWithRect_(
+            AppKit.NSMakeRect(0, 0, w, h)).fill()
 
     for s in shapes:
         st = s["style"]
