@@ -1136,7 +1136,7 @@ def main() -> int:
     ap.add_argument("--no-device", action="store_true", help="不读按键（菜单手动开始/结束）")
     ap.add_argument("--no-model-download", action="store_true",
                     help="模型没下载时不自动拉取，直接把路径报出来（离线/自己放模型时用）")
-    ap.add_argument("--label", default="VoxKey", help="图标旁的文字（空串=不显示，默认 VoxKey）")
+    ap.add_argument("--label", default="", help="图标旁的文字（默认不显示，只留图标）")
     ap.add_argument("--save-audio", metavar="DIR", default=None,
                     help="每次按键的音频都存成 wav + 一行索引（排查丢音频用）")
     ap.add_argument("--debug-keys", action="store_true",
